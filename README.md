@@ -1,2 +1,1 @@
-# DSS
-digitalSTROM ⚡ Server Api in Rust
+# digitalSTROM Server Api in Rust ⚡
