@@ -9,14 +9,20 @@ fn main() {
     println!("{:?}", api.get_zones());
     println!("{:?}", api.get_scenes(1, Type::Shadow));
     println!("{:?}", api.get_scenes(2, Type::Shadow));
-    println!("{:?}", api.get_scenes(3, Type::Shadow));
+    println!("{:?}", api.get_scenes(10, Type::Light));
 
+    let res = api.plain_request(
+        "event/get",
+        Some(vec![("timeout", "3000"), ("subscriptionID", "911")]),
+    );
 
-    println!("{:?}", api.call_scene(2, Type::Shadow, 15));
+    println!("{:?}", api.get_devices());
 
+    // let res = api.get_shadow_device_angle("303505d7f8000f800009a711");
+    // let res = api.set_shadow_device_angle("303505d7f8000f800009a711", 0.5);
+    println!("{:?}", res);
 
     std::thread::sleep_ms(600000);
-    println!("{:?}", api.logout());
 }
 
 #[derive(Debug, Clone)]
@@ -68,21 +74,6 @@ impl Api {
             .as_str()
             .ok_or("Token is not a String")?
             .to_string();
-
-        // register event
-        self.plain_request(
-            "event/subscribe",
-            Some(vec![("name", "callScene"), ("subscriptionID", "911")]),
-        )?;
-
-        Ok(())
-    }
-
-    pub fn logout(&self) -> Result<()> {
-        self.plain_request(
-            "event/unsubscribe",
-            Some(vec![("name", "callScene"), ("subscriptionID", "911")]),
-        )?;
 
         Ok(())
     }
@@ -276,6 +267,12 @@ impl Api {
         Ok(name.to_string())
     }
 
+    pub fn get_devices(&self) -> Result<Vec<Device>> {
+        let res = self.plain_request("apartment/getDevices", None)?;
+
+        Ok(serde_json::from_value(res)?)
+    }
+
     pub fn get_scenes(&self, zone: usize, typ: Type) -> Result<Vec<usize>> {
         // convert the enum to usize
         let typ = typ as usize;
@@ -330,6 +327,132 @@ impl Api {
                 ("id", &zone.to_string()),
                 ("groupID", &typ.to_string()),
                 ("sceneNumber", &scene.to_string()),
+            ]),
+        )?;
+
+        Ok(())
+    }
+
+
+    pub fn get_shadow_device_open<S>(&self, device: S) -> Result<f32>
+    where
+        S: Into<String>,
+    {
+        // make the request
+        let res = self.plain_request(
+            "device/getOutputValue",
+            Some(vec![("dsid", &device.into()), ("offset", "2")]),
+        )?;
+
+        // check for the right offset
+        if res
+            .get("offset")
+            .ok_or("No offset returnes")?
+            .as_u64()
+            .ok_or("The offset is not a number")?
+            != 2
+        {
+            return Err(Error::from("Wrong offset returned"));
+        }
+
+        // extract the value
+        let value = res
+            .get("value")
+            .ok_or("No value returnes")?
+            .as_u64()
+            .ok_or("The value is not a number")?;
+
+        // get the procentage
+        let value = (value as f32) / 65535.0;
+
+        // turn the value around
+        Ok(1.0 - value)
+    }
+
+
+    pub fn set_shadow_device_open<S>(&self, device: S, value: f32) -> Result<()>
+    where
+        S: Into<String>,
+    {
+        // min size is 0
+        let value = value.max(0.0);
+
+        // max size is 1
+        let value = value.min(1.0);
+
+        // move the direction 1 is down 0 is up
+        let value = 1.0 - value;
+
+        // transform to dss range
+        let value = (65535.0 * value) as usize;
+
+        // make the request
+        self.plain_request(
+            "device/setOutputValue",
+            Some(vec![
+                ("dsid", &device.into()),
+                ("value", &format!("{}", value)),
+                ("offset", "2"),
+            ]),
+        )?;
+
+        Ok(())
+    }
+
+    pub fn get_shadow_device_angle<S>(&self, device: S) -> Result<f32>
+    where
+        S: Into<String>,
+    {
+        // make the request
+        let res = self.plain_request(
+            "device/getOutputValue",
+            Some(vec![("dsid", &device.into()), ("offset", "4")]),
+        )?;
+
+        // check for the right offset
+        if res
+            .get("offset")
+            .ok_or("No offset returnes")?
+            .as_u64()
+            .ok_or("The offset is not a number")?
+            != 4
+        {
+            return Err(Error::from("Wrong offset returned"));
+        }
+
+        // extract the value
+        let value = res
+            .get("value")
+            .ok_or("No value returnes")?
+            .as_u64()
+            .ok_or("The value is not a number")?;
+
+        // get the procentage
+        let value = (value as f32) / 65535.0;
+
+        Ok(value)
+    }
+
+    pub fn set_shadow_device_angle<S>(&self, device: S, value: f32) -> Result<()>
+    where
+        S: Into<String>,
+    {
+        // min size is 0
+        let value = value.max(0.0);
+
+        // max size is 1
+        let value = value.min(1.0);
+
+        // transform to dss range
+        let value = (255.0 * value) as usize;
+
+        // make the request
+        self.plain_request(
+            "device/setOutputValue",
+            Some(vec![
+                ("dsid", &device.into()),
+                ("value", &format!("{}", value)),
+                ("offset", "4"),
             ]),
         )?;
 
@@ -392,6 +515,16 @@ pub enum Type {
     Unknown = 0,
     Light = 1,
     Shadow = 2,
+    Heating = 3,
+    Audio = 4,
+    Video = 5,
+    Joker = 8,
+    Cooling = 9,
+    Ventilation = 10,
+    Window = 11,
+    AirRecirculation = 12,
+    TemperatureControl = 48,
+    ApartmentVentilation = 64,
 }
 
 impl From<u8> for Type {
@@ -399,6 +532,16 @@ impl From<u8> for Type {
         match u {
             1 => Type::Light,
             2 => Type::Shadow,
+            3 => Type::Heating,
+            4 => Type::Audio,
+            5 => Type::Video,
+            8 => Type::Joker,
+            9 => Type::Cooling,
+            10 => Type::Ventilation,
+            11 => Type::Window,
+            12 => Type::AirRecirculation,
+            48 => Type::TemperatureControl,
+            64 => Type::ApartmentVentilation,
             _ => Type::Unknown,
         }
     }
@@ -425,6 +568,10 @@ pub enum Action {
     ShadowDown(usize),
     AllShadowStop,
     ShadowStop(usize),
+    ShadowStepOpen,
+    ShadowStepClose,
+    AllShadowSpecial1,
+    AllShadowSpecial2,
     Unknown,
 }
 
@@ -476,8 +623,40 @@ impl From<Event> for Action {
             return Action::ShadowStop(e.scene - 51);
         }
 
+        if e.typ == Type::Shadow && e.scene == 42 {
+            return Action::ShadowStepClose;
+        }
+
+        if e.typ == Type::Shadow && e.scene == 43 {
+            return Action::ShadowStepOpen;
+        }
+
+        if e.typ == Type::Shadow && e.scene == 17 {
+            return Action::AllShadowUp;
+        }
+
+        if e.typ == Type::Shadow && e.scene == 18 {
+            return Action::AllShadowSpecial1;
+        }
+
+        if e.typ == Type::Shadow && e.scene == 19 {
+            return Action::AllShadowSpecial2;
+        }
+
         Action::Unknown
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Device {
+    pub id: String,
+    pub name: String,
+    #[serde(alias = "zoneID")]
+    pub zone_id: usize,
+    #[serde(alias = "isPresent")]
+    pub present: bool,
+    #[serde(alias = "groups")]
+    pub types: Vec<Type>,
 }
 
 
