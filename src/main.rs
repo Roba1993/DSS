@@ -1,6 +1,4 @@
 fn main() {
-    //println!("{:?}", api.plain_request("apartment/getCircuits", None));
-
     let api = Api::new("dss", "dssadmin", "dssadmin").unwrap();
 
     api.set_event_handler(&|e| println!("{:?}", e));
@@ -11,16 +9,11 @@ fn main() {
     println!("{:?}", api.get_scenes(2, Type::Shadow));
     println!("{:?}", api.get_scenes(10, Type::Light));
 
-    let res = api.plain_request(
-        "event/get",
-        Some(vec![("timeout", "3000"), ("subscriptionID", "911")]),
-    );
-
-    println!("{:?}", api.get_devices());
+    println!("{:#?}", api.get_devices());
 
     // let res = api.get_shadow_device_angle("303505d7f8000f800009a711");
     // let res = api.set_shadow_device_angle("303505d7f8000f800009a711", 0.5);
-    println!("{:?}", res);
+    // println!("{:?}", res);
 
     std::thread::sleep_ms(600000);
 }
@@ -269,6 +262,17 @@ impl Api {
 
     pub fn get_devices(&self) -> Result<Vec<Device>> {
         let res = self.plain_request("apartment/getDevices", None)?;
+
+        Ok(serde_json::from_value(res)?)
+    }
+
+    pub fn get_circuits(&self) -> Result<Vec<Circut>> {
+        let mut res = self.plain_request("apartment/getCircuits", None)?;
+
+        let res = res
+            .get_mut("circuits")
+            .ok_or("No circuits available")?
+            .take();
 
         Ok(serde_json::from_value(res)?)
     }
@@ -655,8 +659,52 @@ pub struct Device {
     pub zone_id: usize,
     #[serde(alias = "isPresent")]
     pub present: bool,
+    #[serde(alias = "outputMode")]
+    pub device_type: DeviceType,
     #[serde(alias = "groups")]
     pub types: Vec<Type>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub enum DeviceType {
+    Switch,
+    Light,
+    Tv,
+    Shadow,
+    Unknown,
+}
+
+impl From<usize> for DeviceType {
+    fn from(num: usize) -> Self {
+        match num {
+            0 => DeviceType::Switch,
+            16 | 22 | 35 => DeviceType::Light,
+            33 => DeviceType::Shadow,
+            39 => DeviceType::Tv,
+            _ => DeviceType::Unknown,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DeviceType {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<DeviceType, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(DeviceType::from(usize::deserialize(deserializer)?))
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Circut {
+    #[serde(alias = "dsid")]
+    pub id: String,
+    pub name: String,
+    #[serde(alias = "isPresent")]
+    pub present: bool,
+    #[serde(alias = "isValid")]
+    pub valid: bool,
+
 }
 
 
