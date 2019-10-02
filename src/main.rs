@@ -1,21 +1,164 @@
-fn main() {
-    let api = Api::new("dss", "dssadmin", "dssadmin").unwrap();
+fn main() -> Result<()> {
+    let api = Api::new("dss", "dssadmin", "dssadmin")?;
+    //let events = api.set_event_handler()?;
 
-    api.set_event_handler(&|e| println!("{:?}", e));
+    //let manager = Manager::new("dss", "dssadmin", "dssadmin")?;
+    //println!("{:#?}", manager.get_structure());
+    //manager.on_update();
+
+    let appt = Appartement::new("dss", "dssadmin", "dssadmin")?;
+    println!("{:#?}", appt.inner.lock().unwrap().groups);
+
+    api.call_scene(2, Type::Light, 5);
+
+    /*loop {
+        println!("{:#?}", events.recv());
+    }*/
+
+    Ok(())
+}
 
 
-    println!("{:?}", api.get_zones());
-    println!("{:?}", api.get_scenes(1, Type::Shadow));
-    println!("{:?}", api.get_scenes(2, Type::Shadow));
-    println!("{:?}", api.get_scenes(10, Type::Light));
+#[derive(Debug)]
+pub struct Appartement {
+    inner: std::sync::Arc<std::sync::Mutex<InnerAppartement>>,
+}
 
-    println!("{:#?}", api.get_devices());
+impl Appartement {
+    pub fn new<S>(host: S, user: S, password: S) -> Result<Appartement>
+    where
+        S: Into<String>,
+    {
+        // create the Appartment with the inner values
+        let appt = Appartement {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(InnerAppartement {
+                api: Api::new(host, user, password)?,
+                zones: vec![],
+                groups: vec![],
+            })),
+        };
 
-    // let res = api.get_shadow_device_angle("303505d7f8000f800009a711");
-    // let res = api.set_shadow_device_angle("303505d7f8000f800009a711", 0.5);
-    // println!("{:?}", res);
+        // update the complete structure
+        appt.update_all()?;
 
-    std::thread::sleep_ms(600000);
+        Ok(appt)
+    }
+
+    pub fn update_all(&self) -> Result<()> {
+        self.inner.lock()?.update_all()?;
+        Ok(())
+    }
+}
+
+impl std::fmt::Display for Appartement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let zones = self
+            .inner
+            .lock()
+            .map_err(|_| std::fmt::Error::default())?
+            .zones
+            .clone();
+        let groups = self
+            .inner
+            .lock()
+            .map_err(|_| std::fmt::Error::default())?
+            .groups
+            .clone();
+
+        for zone in zones {
+            writeln!(f, "{:#?}", zone)?;
+            for group in groups.iter().filter(|g| g.zone_id == zone.id) {
+                writeln!(f, "{:#?}", group)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct InnerAppartement {
+    api: Api,
+    zones: Vec<Zone>,
+    groups: Vec<Group>,
+}
+
+impl InnerAppartement {
+    fn update_all(&mut self) -> Result<()> {
+        self.update_zones()?;
+        self.update_groups()?;
+        Ok(())
+    }
+
+    fn update_zones(&mut self) -> Result<()> {
+        self.zones = self
+            .api
+            .get_zones()?
+            .into_iter()
+            .filter(|z| z.id != 0 && z.id != 65534)
+            .collect();
+        Ok(())
+    }
+
+    fn update_groups(&mut self) -> Result<()> {
+        let devices = self.api.get_devices()?;
+        let mut groups = vec![];
+
+        for zone in &self.zones {
+            for typ in &zone.types {
+                // get all available scenes for this zone
+                let scenes = self.api.get_scenes(zone.id, typ.clone())?;
+
+                // convert the scenes to groups
+                let mut scene_groups = Group::from_scenes(&scenes, zone.id, &typ);
+
+                // the last called scene for this typ within a zone
+                let lcs = self.api.get_last_called_scene(zone.id, typ.clone())?;
+
+                // convert the last called scene to an action
+                let action = Action::new(typ.clone(), lcs);
+
+                // add the last called action for each scene group
+                scene_groups
+                    .iter_mut()
+                    .for_each(|g| g.status = Value::from_action(action.clone(), g.id));
+
+                // add the scene groups to the group array
+                groups.append(&mut scene_groups);
+            }
+        }
+
+        for group in &mut groups {
+            // loop over all devices
+            // filtered down to light and shadow devices
+            for device in devices.iter().filter(|d| {
+                d.device_type == DeviceType::Light || d.device_type == DeviceType::Shadow
+            }) {
+                // if the device matches and the group is 0 (which means general all devices)
+                if group.id == 0
+                    && device.zone_id == group.zone_id
+                    && group.typ == device.button_type
+                {
+                    group.devices.push(device.clone());
+                }
+                // when the devices matches, but the scene group is not 0 we need to check where to sort the device
+                else if device.zone_id == group.zone_id && group.typ == device.button_type {
+                    // check the device mode for this scene within that zone
+                    let dsm = self
+                        .api
+                        .get_device_scene_mode(device.id.clone(), group.id)?;
+                    // when the device cares about this scene group we add it
+                    if !dsm.dont_care {
+                        group.devices.push(device.clone());
+                    }
+                }
+            }
+        }
+
+        self.groups = groups;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -123,11 +266,14 @@ impl Api {
         }
     }
 
-    pub fn set_event_handler<F>(&self, func: &'static F)
-    where
-        F: Fn(Event) + std::marker::Sync,
-    {
-        // create a channel to send dataa from one to the other thread
+    pub fn set_event_handler(&self) -> Result<std::sync::mpsc::Receiver<Event>> {
+        // subscribe to event
+        self.plain_request(
+            "event/subscribe",
+            Some(vec![("name", "callScene"), ("subscriptionID", "911")]),
+        )?;
+
+        // create a channel to send data from one to the other thread
         let (send, recv) = std::sync::mpsc::channel();
 
         // this thread is just receiving data and directly reconnects
@@ -147,6 +293,9 @@ impl Api {
             }
         });
 
+        // create a channel to send teh event to thhe receiver
+        let (inp, out) = std::sync::mpsc::channel();
+
         // this thread is processing the data and calls the event handler
         let this = self.clone();
         std::thread::spawn(move || loop {
@@ -160,7 +309,9 @@ impl Api {
                         // extract the json into an event array
                         this.extract_events(&mut v).and_then(|es| {
                             // for each event call the event handler function
-                            es.into_iter().for_each(|e| func(e));
+                            es.into_iter().for_each(|e| {
+                                let _tmp = inp.send(e);
+                            });
                             Ok(())
                         });
                         Ok(())
@@ -170,6 +321,8 @@ impl Api {
             }
 
         });
+
+        Ok(out)
     }
 
     fn extract_events(&self, json: &mut serde_json::Value) -> Result<Vec<Event>> {
@@ -198,6 +351,10 @@ impl Api {
             event.name = name;
 
             event.action = Action::from(event.clone());
+
+            event.group = Group::group_id_from_scene_id(event.scene);
+
+            event.value = Value::from_action(event.action.clone(), event.group);
 
             out.push(event);
         }
@@ -264,6 +421,22 @@ impl Api {
         let res = self.plain_request("apartment/getDevices", None)?;
 
         Ok(serde_json::from_value(res)?)
+    }
+
+    pub fn get_device_scene_mode<S>(&self, device: S, scene_id: usize) -> Result<SceneMode>
+    where
+        S: Into<String>,
+    {
+        let json = self.plain_request(
+            "device/getSceneMode",
+            Some(vec![
+                ("dsid", &device.into()),
+                ("sceneID", &scene_id.to_string()),
+            ]),
+        )?;
+
+        // convert to SceneMode
+        Ok(serde_json::from_value(json)?)
     }
 
     pub fn get_circuits(&self) -> Result<Vec<Circut>> {
@@ -501,6 +674,12 @@ pub struct Event {
 
     #[serde(default)]
     pub action: Action,
+
+    #[serde(default)]
+    pub value: Value,
+
+    #[serde(default)]
+    pub group: usize,
 }
 
 
@@ -579,6 +758,72 @@ pub enum Action {
     Unknown,
 }
 
+impl Action {
+    fn new(typ: Type, scene: usize) -> Action {
+        if typ == Type::Light && scene == 0 {
+            return Action::AllLightOff;
+        }
+
+        if typ == Type::Light && scene == 5 {
+            return Action::AllLightOn;
+        }
+
+        if typ == Type::Shadow && scene == 0 {
+            return Action::AllShadowDown;
+        }
+
+        if typ == Type::Shadow && scene == 5 {
+            return Action::AllShadowUp;
+        }
+
+        if scene > 0 && scene < 5 {
+            if typ == Type::Light {
+                return Action::LightOff(scene);
+            } else if typ == Type::Shadow {
+                return Action::ShadowDown(scene);
+            }
+        }
+
+        if scene > 5 && scene < 9 {
+            if typ == Type::Light {
+                return Action::LightOn(scene - 5);
+            } else if typ == Type::Shadow {
+                return Action::ShadowUp(scene - 5);
+            }
+        }
+
+        if typ == Type::Shadow && scene == 55 {
+            return Action::AllShadowStop;
+        }
+
+        if typ == Type::Shadow && scene > 50 && scene < 55 {
+            return Action::ShadowStop(scene - 51);
+        }
+
+        if typ == Type::Shadow && scene == 42 {
+            return Action::ShadowStepClose;
+        }
+
+        if typ == Type::Shadow && scene == 43 {
+            return Action::ShadowStepOpen;
+        }
+
+        if typ == Type::Shadow && scene == 17 {
+            return Action::AllShadowUp;
+        }
+
+        if typ == Type::Shadow && scene == 18 {
+            return Action::AllShadowSpecial1;
+        }
+
+        if typ == Type::Shadow && scene == 19 {
+            return Action::AllShadowSpecial2;
+        }
+
+        Action::Unknown
+    }
+}
+
 impl Default for Action {
     fn default() -> Self {
         Action::Unknown
@@ -587,67 +832,36 @@ impl Default for Action {
 
 impl From<Event> for Action {
     fn from(e: Event) -> Self {
-        if e.typ == Type::Light && e.scene == 0 {
-            return Action::AllLightOff;
-        }
+        Action::new(e.typ, e.scene)
+    }
+}
 
-        if e.typ == Type::Light && e.scene == 5 {
-            return Action::AllLightOn;
-        }
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub enum Value {
+    Light(f32),
+    Shadow(f32, f32),
+    Unknown,
+}
 
-        if e.typ == Type::Shadow && e.scene == 0 {
-            return Action::AllShadowDown;
+impl Value {
+    pub fn from_action(action: Action, _id: usize) -> Self {
+        match action {
+            Action::AllLightOn => Value::Light(1.0),
+            Action::LightOn(_id) => Value::Light(1.0),
+            Action::AllLightOff => Value::Light(0.0),
+            Action::LightOff(_id) => Value::Light(0.0),
+            Action::AllShadowUp => Value::Shadow(0.0, 1.0),
+            Action::AllShadowDown => Value::Shadow(1.0, 0.0),
+            Action::ShadowDown(_id) => Value::Shadow(1.0, 0.0),
+            Action::ShadowUp(_id) => Value::Shadow(0.0, 1.0),
+            _ => Value::Unknown,
         }
+    }
+}
 
-        if e.typ == Type::Shadow && e.scene == 5 {
-            return Action::AllShadowUp;
-        }
-
-        if e.scene > 0 && e.scene < 5 {
-            if e.typ == Type::Light {
-                return Action::LightOff(e.scene - 1);
-            } else if e.typ == Type::Shadow {
-                return Action::ShadowDown(e.scene - 1);
-            }
-        }
-
-        if e.scene > 4 && e.scene < 9 {
-            if e.typ == Type::Light {
-                return Action::LightOn(e.scene - 5);
-            } else if e.typ == Type::Shadow {
-                return Action::ShadowUp(e.scene - 5);
-            }
-        }
-
-        if e.typ == Type::Shadow && e.scene == 55 {
-            return Action::AllShadowStop;
-        }
-
-        if e.typ == Type::Shadow && e.scene > 50 && e.scene < 55 {
-            return Action::ShadowStop(e.scene - 51);
-        }
-
-        if e.typ == Type::Shadow && e.scene == 42 {
-            return Action::ShadowStepClose;
-        }
-
-        if e.typ == Type::Shadow && e.scene == 43 {
-            return Action::ShadowStepOpen;
-        }
-
-        if e.typ == Type::Shadow && e.scene == 17 {
-            return Action::AllShadowUp;
-        }
-
-        if e.typ == Type::Shadow && e.scene == 18 {
-            return Action::AllShadowSpecial1;
-        }
-
-        if e.typ == Type::Shadow && e.scene == 19 {
-            return Action::AllShadowSpecial2;
-        }
-
-        Action::Unknown
+impl Default for Value {
+    fn default() -> Self {
+        Value::Unknown
     }
 }
 
@@ -663,9 +877,11 @@ pub struct Device {
     pub device_type: DeviceType,
     #[serde(alias = "groups")]
     pub types: Vec<Type>,
+    #[serde(alias = "buttonActiveGroup")]
+    pub button_type: Type,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
 pub enum DeviceType {
     Switch,
     Light,
@@ -704,7 +920,95 @@ pub struct Circut {
     pub present: bool,
     #[serde(alias = "isValid")]
     pub valid: bool,
+}
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SceneMode {
+    #[serde(alias = "sceneID")]
+    pub scene: usize,
+    #[serde(alias = "dontCare")]
+    pub dont_care: bool,
+    #[serde(alias = "localPrio")]
+    pub local_prio: bool,
+    #[serde(alias = "specialMode")]
+    pub special_mode: bool,
+    #[serde(alias = "flashMode")]
+    pub flash_mode: bool,
+    #[serde(alias = "ledconIndex")]
+    pub led_con_index: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Group {
+    id: usize,
+    zone_id: usize,
+    typ: Type,
+    status: Value,
+    devices: Vec<Device>,
+}
+
+impl Group {
+    pub fn new(id: usize, zone_id: usize, typ: Type) -> Self {
+        Group {
+            id,
+            zone_id: zone_id,
+            typ,
+            devices: vec![],
+            status: Value::default(),
+        }
+    }
+
+    pub fn group_id_from_scene_id(scene: usize) -> usize {
+        if scene > 0 && scene < 5 {
+            return scene;
+        }
+
+        if scene > 5 && scene < 9 {
+            return scene - 5;
+        }
+
+        if scene > 50 && scene < 55 {
+            return scene - 51;
+        }
+
+        0
+
+    }
+
+    pub fn from_scene(scene: usize, zone_id: usize, typ: &Type) -> Option<Group> {
+        // add the different scene groups if they exist
+        for x in 1..4 {
+            if scene == x {
+                return Some(Group::new(x, zone_id, typ.clone()));
+            }
+        }
+
+        // if no different scene groups availabe, we take the general one
+        if scene == 0 {
+            return Some(Group::new(0, zone_id, typ.clone()));
+        }
+
+        None
+    }
+
+    pub fn from_scenes(scenes: &[usize], zone_id: usize, typ: &Type) -> Vec<Group> {
+        scenes
+            .iter()
+            .filter_map(|s| Group::from_scene(*s, zone_id, typ))
+            .collect()
+    }
+}
+
+impl Default for Group {
+    fn default() -> Self {
+        Group {
+            id: 0,
+            zone_id: 0,
+            typ: Type::Unknown,
+            devices: vec![],
+            status: Value::default(),
+        }
+    }
 }
 
 
@@ -763,5 +1067,12 @@ impl From<serde_json::Error> for Error {
 impl From<reqwest::Error> for Error {
     fn from(err: reqwest::Error) -> Self {
         Error::Reqwest(err)
+    }
+}
+
+// implement mutex poison error
+impl<T> From<std::sync::PoisonError<T>> for Error {
+    fn from(_err: std::sync::PoisonError<T>) -> Self {
+        Error::from("Poison error")
     }
 }
