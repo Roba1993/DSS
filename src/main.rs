@@ -1,25 +1,33 @@
 fn main() -> Result<()> {
-    let api = Api::new("dss", "dssadmin", "dssadmin")?;
-    //let events = api.set_event_handler()?;
+    //let api = Api::new("dss", "dssadmin", "dssadmin")?;
+    //let (events, status) = api.new_event_channel()?;
+    //*status.lock().unwrap() = false;
 
-    //let manager = Manager::new("dss", "dssadmin", "dssadmin")?;
-    //println!("{:#?}", manager.get_structure());
-    //manager.on_update();
-
+    let events;
+    {
     let appt = Appartement::new("dss", "dssadmin", "dssadmin")?;
-    println!("{:#?}", appt.inner.lock().unwrap().groups);
+    println!("{:#?}", appt.get_zones());
+    events = appt.event_channel()?;
+    }
 
-    api.call_scene(2, Type::Light, 5);
+    //api.call_scene(2, Type::Light, 0);
 
-    /*loop {
-        println!("{:#?}", events.recv());
-    }*/
+    loop {
+        let res = events.recv();
+
+        match res {
+            Ok(v) => println!("{:#?}", v),
+            Err(_) => {
+                println!("Channel Closed");
+                break;
+            }
+        }
+    }
 
     Ok(())
 }
 
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Appartement {
     inner: std::sync::Arc<std::sync::Mutex<InnerAppartement>>,
 }
@@ -34,45 +42,42 @@ impl Appartement {
             inner: std::sync::Arc::new(std::sync::Mutex::new(InnerAppartement {
                 api: Api::new(host, user, password)?,
                 zones: vec![],
-                groups: vec![],
+                thread: std::sync::Arc::new(std::sync::Mutex::new(false)),
             })),
         };
 
         // update the complete structure
-        appt.update_all()?;
+        appt.inner.lock()?.update_structure()?;
 
         Ok(appt)
     }
 
-    pub fn update_all(&self) -> Result<()> {
-        self.inner.lock()?.update_all()?;
-        Ok(())
+    /// Returns an vector of all zones with their groups.
+    ///
+    /// Keep in mind, that the values are in a frozen state.
+    /// If you want to stay informed about changes, use the
+    /// 'event_channel()' function.
+    pub fn get_zones(&self) -> Result<Vec<Zone>> {
+        Ok(self.inner.lock()?.zones.clone())
     }
-}
 
-impl std::fmt::Display for Appartement {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let zones = self
-            .inner
-            .lock()
-            .map_err(|_| std::fmt::Error::default())?
-            .zones
-            .clone();
-        let groups = self
-            .inner
-            .lock()
-            .map_err(|_| std::fmt::Error::default())?
-            .groups
-            .clone();
+    /// Updates the complete appartment structure, this command can take some time
+    /// to execute (more than 10 seconds).
+    ///
+    /// Use the 'get_zones()' function to get the actual structure with updates
+    /// values for each group.
+    pub fn update_all(&self) -> Result<Vec<Zone>> {
+        self.inner.lock()?.update_structure()?;
+        Ok(self.inner.lock()?.zones.clone())
+    }
 
-        for zone in zones {
-            writeln!(f, "{:#?}", zone)?;
-            for group in groups.iter().filter(|g| g.zone_id == zone.id) {
-                writeln!(f, "{:#?}", group)?;
-            }
-        }
-
-        Ok(())
+    /// Get the event channel for the appartment.
+    ///
+    /// When a channel is already open for this apparment, we close the open one
+    /// and create a new one which gets returned.
+    /// Therefore it's not recommended to call this function twice for one appartment.
+    pub fn event_channel(&self) -> Result<std::sync::mpsc::Receiver<Event>> {
+        self.inner.lock()?.get_event_channel()
     }
 }
 
@@ -80,31 +85,38 @@ impl std::fmt::Display for Appartement {
 struct InnerAppartement {
     api: Api,
     zones: Vec<Zone>,
-    groups: Vec<Group>,
+    thread: std::sync::Arc<std::sync::Mutex<bool>>,
 }
 
 impl InnerAppartement {
-    fn update_all(&mut self) -> Result<()> {
-        self.update_zones()?;
-        self.update_groups()?;
-        Ok(())
+    /// Get the event channel from the API.
+    ///
+    /// When a channel is already open for this apparment, we close the open one
+    /// and create a new one we are returning.
+    /// Therefore it's not recommended to call this function twice for one appartment instance.
+    fn get_event_channel(&mut self) -> Result<std::sync::mpsc::Receiver<Event>> {
+        // when there are threads already existing close them
+        if *self.thread.lock()? == true {
+            *self.thread.lock()? = false;
+        }
+
+        // request a new channel
+        let (recv, status) = self.api.new_event_channel()?;
+        self.thread = status;
+        Ok(recv)
     }
 
-    fn update_zones(&mut self) -> Result<()> {
-        self.zones = self
+    fn update_structure(&mut self) -> Result<()> {
+        let devices = self.api.get_devices()?;
+        let mut zones: Vec<Zone> = self
             .api
             .get_zones()?
             .into_iter()
             .filter(|z| z.id != 0 && z.id != 65534)
             .collect();
-        Ok(())
-    }
 
-    fn update_groups(&mut self) -> Result<()> {
-        let devices = self.api.get_devices()?;
-        let mut groups = vec![];
-
-        for zone in &self.zones {
+        for zone in &mut zones {
+            // add all the groups
             for typ in &zone.types {
                 // get all available scenes for this zone
                 let scenes = self.api.get_scenes(zone.id, typ.clone())?;
@@ -124,40 +136,54 @@ impl InnerAppartement {
                     .for_each(|g| g.status = Value::from_action(action.clone(), g.id));
 
                 // add the scene groups to the group array
-                groups.append(&mut scene_groups);
+                zone.groups.append(&mut scene_groups);
             }
-        }
 
-        for group in &mut groups {
-            // loop over all devices
-            // filtered down to light and shadow devices
-            for device in devices.iter().filter(|d| {
-                d.device_type == DeviceType::Light || d.device_type == DeviceType::Shadow
-            }) {
-                // if the device matches and the group is 0 (which means general all devices)
-                if group.id == 0
-                    && device.zone_id == group.zone_id
-                    && group.typ == device.button_type
-                {
-                    group.devices.push(device.clone());
-                }
-                // when the devices matches, but the scene group is not 0 we need to check where to sort the device
-                else if device.zone_id == group.zone_id && group.typ == device.button_type {
-                    // check the device mode for this scene within that zone
-                    let dsm = self
-                        .api
-                        .get_device_scene_mode(device.id.clone(), group.id)?;
-                    // when the device cares about this scene group we add it
-                    if !dsm.dont_care {
+            // for every group add the devices
+            for group in &mut zone.groups {
+                // loop over all devices
+                // filtered down to light and shadow devices
+                for device in devices.iter().filter(|d| {
+                    d.device_type == DeviceType::Light || d.device_type == DeviceType::Shadow
+                }) {
+                    // if the device matches and the group is 0 (which means general all devices)
+                    if group.id == 0
+                        && device.zone_id == group.zone_id
+                        && group.typ == device.button_type
+                    {
                         group.devices.push(device.clone());
+                    }
+                    // when the devices matches, but the scene group is not 0 we need to check where to sort the device
+                    else if device.zone_id == group.zone_id && group.typ == device.button_type {
+                        // check the device mode for this scene within that zone
+                        let _ = self
+                            .api
+                            .get_device_scene_mode(device.id.clone(), group.id)
+                            .and_then(|dsm| {
+                                // when the device cares about this scene group we add it
+                                if !dsm.dont_care {
+                                    group.devices.push(device.clone());
+                                }
+                                Ok(())
+                            });
                     }
                 }
             }
         }
 
-        self.groups = groups;
+        self.zones = zones;
 
         Ok(())
+    }
+}
+
+impl Drop for InnerAppartement {
+    fn drop(&mut self) {
+        // if it fails we can't stop the threads
+        #[allow(unused_must_use)]
+        {
+            self.thread.lock().map(|mut v| *v = false);
+        }
     }
 }
 
@@ -266,7 +292,15 @@ impl Api {
         }
     }
 
-    pub fn set_event_handler(&self) -> Result<std::sync::mpsc::Receiver<Event>> {
+    pub fn new_event_channel(
+        &self,
+    ) -> Result<(
+        std::sync::mpsc::Receiver<Event>,
+        std::sync::Arc<std::sync::Mutex<bool>>,
+    )> {
+        // shareable boolean to stop threads
+        let thread_status = std::sync::Arc::new(std::sync::Mutex::new(true));
+
         // subscribe to event
         self.plain_request(
             "event/subscribe",
@@ -278,12 +312,18 @@ impl Api {
 
         // this thread is just receiving data and directly reconnects
         let this = self.clone();
+        let ts = thread_status.clone();
         std::thread::spawn(move || loop {
             // listen for events at the server
             let res = this.plain_request(
                 "event/get",
                 Some(vec![("timeout", "3000"), ("subscriptionID", "911")]),
             );
+
+            // check if the thread should be ended
+            if *ts.lock().unwrap() == false {
+                break;
+            }
 
             // we have no plan B when the sending fails
             #[allow(unused_must_use)]
@@ -298,12 +338,20 @@ impl Api {
 
         // this thread is processing the data and calls the event handler
         let this = self.clone();
+        let ts = thread_status.clone();
         std::thread::spawn(move || loop {
             // we have no plan B when an error occours
             #[allow(unused_must_use)]
             {
                 // receive from the channel and continue if no channel recv error occoured
-                recv.recv().and_then(|res| {
+                let res = recv.recv();
+
+                // check if the thread should be ended
+                if *ts.lock().unwrap() == false {
+                    break;
+                }
+
+                res.and_then(|res| {
                     // continue when no reqwest (http) error occoured
                     res.and_then(|mut v| {
                         // extract the json into an event array
@@ -319,10 +367,9 @@ impl Api {
                     Ok(())
                 });
             }
-
         });
 
-        Ok(out)
+        Ok((out, thread_status))
     }
 
     fn extract_events(&self, json: &mut serde_json::Value) -> Result<Vec<Event>> {
@@ -400,7 +447,7 @@ impl Api {
             .ok_or("No zones in Json response")?
             .take();
 
-        // transform the date to the zones
+        // transform the data to the zones
         Ok(serde_json::from_value(json)?)
     }
 
@@ -510,7 +557,6 @@ impl Api {
         Ok(())
     }
 
-
     pub fn get_shadow_device_open<S>(&self, device: S) -> Result<f32>
     where
         S: Into<String>,
@@ -545,7 +591,6 @@ impl Api {
         // turn the value around
         Ok(1.0 - value)
     }
-
 
     pub fn set_shadow_device_open<S>(&self, device: S, value: f32) -> Result<()>
     where
@@ -682,7 +727,6 @@ pub struct Event {
     pub group: usize,
 }
 
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Zone {
     #[serde(alias = "zoneID")]
@@ -690,6 +734,8 @@ pub struct Zone {
     pub name: String,
     #[serde(alias = "groups")]
     pub types: Vec<Type>,
+    #[serde(default)]
+    pub groups: Vec<Group>,
 }
 
 #[derive(serde_repr::Serialize_repr, serde_repr::Deserialize_repr, PartialEq, Debug, Clone)]
@@ -972,7 +1018,6 @@ impl Group {
         }
 
         0
-
     }
 
     pub fn from_scene(scene: usize, zone_id: usize, typ: &Type) -> Option<Group> {
@@ -1010,7 +1055,6 @@ impl Default for Group {
         }
     }
 }
-
 
 pub type Result<T> = std::result::Result<T, Error>;
 
