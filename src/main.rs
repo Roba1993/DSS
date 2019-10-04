@@ -3,12 +3,9 @@ fn main() -> Result<()> {
     //let (events, status) = api.new_event_channel()?;
     //*status.lock().unwrap() = false;
 
-    let events;
-    {
     let appt = Appartement::new("dss", "dssadmin", "dssadmin")?;
     println!("{:#?}", appt.get_zones());
-    events = appt.event_channel()?;
-    }
+    let events = appt.event_channel()?;
 
     //api.call_scene(2, Type::Light, 0);
 
@@ -16,7 +13,10 @@ fn main() -> Result<()> {
         let res = events.recv();
 
         match res {
-            Ok(v) => println!("{:#?}", v),
+            Ok(v) => {
+                println!("{:#?}", v);
+                println!("{:#?}", appt.get_zones());
+            }
             Err(_) => {
                 println!("Channel Closed");
                 break;
@@ -77,7 +77,56 @@ impl Appartement {
     /// and create a new one which gets returned.
     /// Therefore it's not recommended to call this function twice for one appartment.
     pub fn event_channel(&self) -> Result<std::sync::mpsc::Receiver<Event>> {
-        self.inner.lock()?.get_event_channel()
+        // when there are threads already existing close them
+        if *self.inner.lock()?.thread.lock()? == true {
+            *self.inner.lock()?.thread.lock()? = false;
+        }
+
+        // request a new event channel
+        let (recv, status) = self.inner.lock()?.api.new_event_channel()?;
+
+        // create the new out channel
+        let (inp, out) = std::sync::mpsc::channel();
+
+        // clone the status for the thread & the structure
+        let internal_status = status.clone();
+        let appr = self.inner.clone();
+
+        std::thread::spawn(move || loop {
+            // listen for events to pop up
+            let event = match recv.recv() {
+                Ok(e) => e,
+                Err(_) => break,
+            };
+
+            // check if the thread should be ended
+            if *internal_status.lock().unwrap() == false {
+                break;
+            }
+
+            // update the appartment structure with the event
+            appr.lock().unwrap().zones.iter_mut().for_each(|z| {
+                // fine the right zone to the event
+                if z.id == event.zone {
+                    z.groups.iter_mut().for_each(|g| {
+                        // find the right group typ && id to update the value
+                        if g.typ == event.typ && g.id == event.group {
+                            g.status = event.value.clone();
+                        }
+                    });
+                }
+            });
+
+            // send the event
+            match inp.send(event) {
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        });
+
+        // update the thread status with the new one received
+        self.inner.lock()?.thread = status;
+        Ok(out)
     }
 }
 
@@ -100,10 +149,36 @@ impl InnerAppartement {
             *self.thread.lock()? = false;
         }
 
-        // request a new channel
+        // request a new event channel
         let (recv, status) = self.api.new_event_channel()?;
+
+        // create the new out channel
+        let (inp, out) = std::sync::mpsc::channel();
+
+        // clone the status for the thread
+        let internal_status = status.clone();
+
+        std::thread::spawn(move || loop {
+            // listen for events to pop up
+            let event = match recv.recv() {
+                Ok(e) => e,
+                Err(_) => break,
+            };
+
+            // check if the thread should be ended
+            if *internal_status.lock().unwrap() == false {
+                break;
+            }
+
+            // send the event
+            match inp.send(event) {
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        });
+
         self.thread = status;
-        Ok(recv)
+        Ok(out)
     }
 
     fn update_structure(&mut self) -> Result<()> {
@@ -1084,7 +1159,7 @@ impl std::error::Error for Error {
         }
     }
 
-    fn cause(&self) -> Option<&std::error::Error> {
+    fn cause(&self) -> Option<&dyn std::error::Error> {
         match self {
             Error::Error(_) => None,
             Error::SerdeJson(ref e) => Some(e),
