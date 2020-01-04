@@ -1,13 +1,12 @@
 fn main() -> Result<()> {
-    //let api = Api::new("dss", "dssadmin", "dssadmin")?;
-    //let (events, status) = api.new_event_channel()?;
-    //*status.lock().unwrap() = false;
+    //(let api = Api::new("dss", "dssadmin", "dssadmin")?;
+    //api.call_action(2, Action::AllShadowUp);
 
     let appt = Appartement::new("dss", "dssadmin", "dssadmin")?;
     println!("{:#?}", appt.get_zones());
     let events = appt.event_channel()?;
 
-    //api.call_scene(2, Type::Light, 0);
+    appt.set_value(2, None, Value::Shadow(0.5, 0.5))?;
 
     loop {
         let res = events.recv();
@@ -15,7 +14,8 @@ fn main() -> Result<()> {
         match res {
             Ok(v) => {
                 println!("{:#?}", v);
-                println!("{:#?}", appt.get_zones());
+                //println!("{:#?}", api.get_last_called_scene(v.zone, v.typ));
+                //println!("{:#?}", appt.get_zones());
             }
             Err(_) => {
                 println!("Channel Closed");
@@ -62,13 +62,17 @@ impl Appartement {
     }
 
     /// Updates the complete appartment structure, this command can take some time
-    /// to execute (more than 10 seconds).
+    /// to execute (more than 30 seconds).
     ///
     /// Use the 'get_zones()' function to get the actual structure with updates
     /// values for each group.
     pub fn update_all(&self) -> Result<Vec<Zone>> {
         self.inner.lock()?.update_structure()?;
         Ok(self.inner.lock()?.zones.clone())
+    }
+
+    pub fn set_value(&self, zone: usize, group: Option<usize>, value: Value) -> Result<()> {
+        self.inner.lock()?.set_value(zone, group, value)
     }
 
     /// Get the event channel for the appartment.
@@ -104,23 +108,31 @@ impl Appartement {
                 break;
             }
 
-            // update the appartment structure with the event
-            appr.lock().unwrap().zones.iter_mut().for_each(|z| {
-                // fine the right zone to the event
-                if z.id == event.zone {
-                    z.groups.iter_mut().for_each(|g| {
-                        // find the right group typ && id to update the value
-                        if g.typ == event.typ && g.id == event.group {
-                            g.status = event.value.clone();
-                        }
-                    });
-                }
-            });
+            // expand the events when necessary
+            let events = appr.lock().unwrap().expand_value(event).unwrap();
 
-            // send the event
-            match inp.send(event) {
-                Ok(_) => {}
-                Err(_) => break,
+            for event in events {
+                // update the event value for shadow etc.
+                let event = appr.lock().unwrap().update_event_value(event).unwrap();
+
+                // update the appartment structure with the event
+                appr.lock().unwrap().zones.iter_mut().for_each(|z| {
+                    // fine the right zone to the event
+                    if z.id == event.zone {
+                        z.groups.iter_mut().for_each(|g| {
+                            // find the right group typ && id to update the value
+                            if g.typ == event.typ && g.id == event.group {
+                                g.status = event.value.clone();
+                            }
+                        });
+                    }
+                });
+
+                // send the event
+                match inp.send(event) {
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
             }
         });
 
@@ -138,47 +150,173 @@ struct InnerAppartement {
 }
 
 impl InnerAppartement {
-    /// Get the event channel from the API.
-    ///
-    /// When a channel is already open for this apparment, we close the open one
-    /// and create a new one we are returning.
-    /// Therefore it's not recommended to call this function twice for one appartment instance.
-    fn get_event_channel(&mut self) -> Result<std::sync::mpsc::Receiver<Event>> {
-        // when there are threads already existing close them
-        if *self.thread.lock()? == true {
-            *self.thread.lock()? = false;
+    fn set_value(&self, zone: usize, group: Option<usize>, value: Value) -> Result<()> {
+        // when a group exist we control the special group
+        if let Some(grp) = group {
+            match value {
+                // depending on the value we turn the light on or off
+                Value::Light(light) => {
+                    if light < 0.5 {
+                        self.api.call_action(zone, Action::LightOff(grp))?;
+                    } else {
+                        self.api.call_action(zone, Action::LightOn(grp))?;
+                    }
+                }
+                // actions need to be performed for setting the shadow
+                Value::Shadow(open, angle) => {
+                    if open <= 0.1 {
+                        self.api.call_action(zone, Action::ShadowUp(grp))?;
+                    }
+                    if open >= 0.9 && angle <= 0.1 {
+                        self.api.call_action(zone, Action::ShadowDown(grp))?;
+                    } else {
+                        // we need to set a specific position and angle, this can't be done over an scene
+
+                        // we need to get all devices for the actual zone and show type
+                        let devices = self
+                            .zones
+                            .iter()
+                            .find(|z| z.id == zone)
+                            .ok_or("Not a valid zone id given")?
+                            .groups
+                            .iter()
+                            .find(|g| g.id == grp)
+                            .ok_or("Not a valid group given")?
+                            .devices
+                            .iter()
+                            .filter(|d| d.device_type == DeviceType::Shadow)
+                            .clone();
+
+                        for dev in devices {
+                            self.api.set_shadow_device_open(dev.id.clone(), open)?;
+                            self.api.set_shadow_device_angle(dev.id.clone(), angle)?;
+                        }
+                    }
+                }
+                Value::Unknown => (),
+            }
+        }
+        // when no group is defined we controll the whole zone
+        else {
+            match value {
+                // depending on the value we turn the light on or off
+                Value::Light(light) => {
+                    if light < 0.5 {
+                        self.api.call_action(zone, Action::AllLightOff)?;
+                    } else {
+                        self.api.call_action(zone, Action::AllLightOn)?;
+                    }
+                }
+                // actions need to be performed for setting the shadow
+                Value::Shadow(open, angle) => {
+                    if open <= 0.1 {
+                        self.api.call_action(zone, Action::AllShadowUp)?;
+                    }
+                    if open >= 0.9 && angle <= 0.1 {
+                        self.api.call_action(zone, Action::AllShadowDown)?;
+                    } else {
+                        // we need to set a specific position and angle, this can't be done over an scene
+
+                        // we need to get all devices for the actual zone
+                        let devices = self
+                            .zones
+                            .iter()
+                            .find(|z| z.id == zone)
+                            .ok_or("Not a valid zone id given")?
+                            .groups
+                            .iter()
+                            .map(|g| g.devices.clone())
+                            .flatten()
+                            .collect::<Vec<Device>>()
+                            .into_iter()
+                            .filter(|d| d.device_type == DeviceType::Shadow);
+
+                        for dev in devices {
+                            self.api.set_shadow_device_open(dev.id.clone(), open)?;
+                            self.api.set_shadow_device_angle(dev.id.clone(), angle)?;
+                        }
+                    }
+                }
+                Value::Unknown => (),
+            }
         }
 
-        // request a new event channel
-        let (recv, status) = self.api.new_event_channel()?;
+        Ok(())
+    }
 
-        // create the new out channel
-        let (inp, out) = std::sync::mpsc::channel();
+    fn expand_value(&self, event: Event) -> Result<Vec<Event>> {
+        // when we have an action of type ShadowStepOpen
+        // it effects all groups of a zone and we create multiple events for it
+        // if we have multiple groups for this typ
+        if event.typ == Type::Shadow
+            && (event.action == Action::ShadowStepOpen || event.action == Action::ShadowStepClose)
+        {
+            // we get all group id's with Shadow within the event zone
+            let groups: Vec<usize> = self
+                .zones
+                .iter()
+                .find(|z| z.id == event.zone)
+                .ok_or("No matching zone available")?
+                .groups
+                .iter()
+                .filter(|g| g.typ == Type::Shadow)
+                .map(|g| g.id)
+                .collect();
 
-        // clone the status for the thread
-        let internal_status = status.clone();
+            // for each shadow group we create a new event
+            return Ok(groups
+                .iter()
+                .map(|g| {
+                    let mut e = event.clone();
+                    e.group = *g;
+                    e
+                })
+                .collect());
+        }
 
-        std::thread::spawn(move || loop {
-            // listen for events to pop up
-            let event = match recv.recv() {
-                Ok(e) => e,
-                Err(_) => break,
-            };
+        Ok(vec![event])
+    }
 
-            // check if the thread should be ended
-            if *internal_status.lock().unwrap() == false {
-                break;
-            }
+    fn update_event_value(&self, event: Event) -> Result<Event> {
+        // make the event mutable
+        let mut event = event;
 
-            // send the event
-            match inp.send(event) {
-                Ok(_) => {}
-                Err(_) => break,
-            }
-        });
+        // update the value
+        event.value = self.update_value(event.value, &event.typ, event.zone, event.group)?;
+        Ok(event)
+    }
 
-        self.thread = status;
-        Ok(out)
+    fn update_value(&self, value: Value, typ: &Type, zone: usize, group: usize) -> Result<Value> {
+        // when the value is already defined, the event is already updated
+        if value != Value::Unknown {
+            return Ok(value);
+        }
+
+        // let's fix the shadow events
+        if typ == &Type::Shadow {
+            // get the first device for the defined group
+            let device = self
+                .zones
+                .iter()
+                .find(|z| z.id == zone)
+                .ok_or("No matching zone found")?
+                .groups
+                .iter()
+                .find(|g| g.id == group && g.typ == Type::Shadow)
+                .ok_or("No matching group found")?
+                .devices
+                .get(0)
+                .ok_or("No devices available")?;
+
+            // get the actual device values
+            let open = self.api.get_shadow_device_open(&device.id)?;
+            let angle = self.api.get_shadow_device_angle(&device.id)?;
+
+            // return them in the Shadow format
+            return Ok(Value::Shadow(open, angle));
+        }
+
+        Ok(value)
     }
 
     fn update_structure(&mut self) -> Result<()> {
@@ -199,11 +337,17 @@ impl InnerAppartement {
                 // convert the scenes to groups
                 let mut scene_groups = Group::from_scenes(&scenes, zone.id, &typ);
 
-                // the last called scene for this typ within a zone
-                let lcs = self.api.get_last_called_scene(zone.id, typ.clone())?;
-
-                // convert the last called scene to an action
-                let action = Action::new(typ.clone(), lcs);
+                // the last called action for shadows are always wrong,
+                // so we set it directly to unknown and dont request the last called scene
+                let action;
+                if typ == &Type::Shadow {
+                    action = Action::Unknown;
+                } else {
+                    // get the last called scene for this typ within a zone
+                    let lcs = self.api.get_last_called_scene(zone.id, typ.clone())?;
+                    // convert the last called scene to an action
+                    action = Action::new(typ.clone(), lcs);
+                }
 
                 // add the last called action for each scene group
                 scene_groups
@@ -242,6 +386,22 @@ impl InnerAppartement {
                                 Ok(())
                             });
                     }
+                }
+            }
+        }
+
+        self.zones = zones.clone();
+
+        for zone in &mut zones {
+            // for every shadow group get the shadow values
+            for group in zone.groups.iter_mut().filter(|g| g.typ == Type::Shadow) {
+                // get the real shadow value
+                let status = self.update_value(group.status.clone(), &group.typ, zone.id, group.id);
+
+                // when the value available, then set it
+                match status {
+                    Ok(v) => group.status = v,
+                    Err(_) => continue,
                 }
             }
         }
@@ -632,6 +792,14 @@ impl Api {
         Ok(())
     }
 
+    pub fn call_action(&self, zone: usize, action: Action) -> Result<()> {
+        // transform the action to a typ and scene
+        let (typ, scene) = action
+            .to_scene_type()
+            .ok_or("Action can't be transformed to scene command")?;
+        self.call_scene(zone, typ, scene)
+    }
+
     pub fn get_shadow_device_open<S>(&self, device: S) -> Result<f32>
     where
         S: Into<String>,
@@ -943,6 +1111,29 @@ impl Action {
 
         Action::Unknown
     }
+
+    fn to_scene_type(&self) -> Option<(Type, usize)> {
+        match self {
+            Action::AllLightOff => Some((Type::Light, 0)),
+            Action::AllLightOn => Some((Type::Light, 5)),
+            Action::LightOff(v) => Some((Type::Light, *v)),
+            Action::LightOn(v) => Some((Type::Light, v + 5)),
+
+            Action::AllShadowDown => Some((Type::Shadow, 0)),
+            Action::AllShadowUp => Some((Type::Shadow, 5)),
+            Action::AllShadowStop => Some((Type::Shadow, 55)),
+            Action::AllShadowSpecial1 => Some((Type::Shadow, 18)),
+            Action::AllShadowSpecial2 => Some((Type::Shadow, 19)),
+
+            Action::ShadowDown(v) => Some((Type::Shadow, *v)),
+            Action::ShadowUp(v) => Some((Type::Shadow, v + 5)),
+            Action::ShadowStop(v) => Some((Type::Shadow, v + 51)),
+            Action::ShadowStepClose => Some((Type::Shadow, 42)),
+            Action::ShadowStepOpen => Some((Type::Shadow, 43)),
+
+            Action::Unknown => None,
+        }
+    }
 }
 
 impl Default for Action {
@@ -1112,10 +1303,16 @@ impl Group {
     }
 
     pub fn from_scenes(scenes: &[usize], zone_id: usize, typ: &Type) -> Vec<Group> {
-        scenes
+        let groups: Vec<Group> = scenes
             .iter()
             .filter_map(|s| Group::from_scene(*s, zone_id, typ))
-            .collect()
+            .collect();
+
+        if groups.len() > 1 {
+            return groups.into_iter().filter(|g| g.id > 0).collect();
+        }
+
+        return groups;
     }
 }
 
