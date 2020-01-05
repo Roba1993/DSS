@@ -1,32 +1,3 @@
-fn main() -> Result<()> {
-    //(let api = Api::new("dss", "dssadmin", "dssadmin")?;
-    //api.call_action(2, Action::AllShadowUp);
-
-    let appt = Appartement::new("dss", "dssadmin", "dssadmin")?;
-    println!("{:#?}", appt.get_zones());
-    let events = appt.event_channel()?;
-
-    appt.set_value(2, None, Value::Shadow(0.5, 0.5))?;
-
-    loop {
-        let res = events.recv();
-
-        match res {
-            Ok(v) => {
-                println!("{:#?}", v);
-                //println!("{:#?}", api.get_last_called_scene(v.zone, v.typ));
-                //println!("{:#?}", appt.get_zones());
-            }
-            Err(_) => {
-                println!("Channel Closed");
-                break;
-            }
-        }
-    }
-
-    Ok(())
-}
-
 #[derive(Debug, Clone)]
 pub struct Appartement {
     inner: std::sync::Arc<std::sync::Mutex<InnerAppartement>>,
@@ -150,7 +121,7 @@ struct InnerAppartement {
 }
 
 impl InnerAppartement {
-    fn set_value(&self, zone: usize, group: Option<usize>, value: Value) -> Result<()> {
+    fn set_value(&mut self, zone: usize, group: Option<usize>, value: Value) -> Result<()> {
         // when a group exist we control the special group
         if let Some(grp) = group {
             match value {
@@ -171,7 +142,6 @@ impl InnerAppartement {
                         self.api.call_action(zone, Action::ShadowDown(grp))?;
                     } else {
                         // we need to set a specific position and angle, this can't be done over an scene
-
                         // we need to get all devices for the actual zone and show type
                         let devices = self
                             .zones
@@ -191,6 +161,17 @@ impl InnerAppartement {
                             self.api.set_shadow_device_open(dev.id.clone(), open)?;
                             self.api.set_shadow_device_angle(dev.id.clone(), angle)?;
                         }
+
+                        // we need to update the state of the shadow manually, because no event will be triggered
+                        self.zones
+                            .iter_mut()
+                            .find(|z| z.id == zone)
+                            .ok_or("No valid zone given")?
+                            .groups
+                            .iter_mut()
+                            .find(|g| g.id == grp)
+                            .ok_or("Not a valid group given")?
+                            .status = value;
                     }
                 }
                 Value::Unknown => (),
@@ -235,6 +216,16 @@ impl InnerAppartement {
                             self.api.set_shadow_device_open(dev.id.clone(), open)?;
                             self.api.set_shadow_device_angle(dev.id.clone(), angle)?;
                         }
+
+                        // we need to update the state of the shadow manually, because no event will be triggered
+                        self.zones
+                            .iter_mut()
+                            .find(|z| z.id == zone)
+                            .ok_or("Not a valid zone id given")?
+                            .groups
+                            .iter_mut()
+                            .filter(|g| g.typ == Type::Shadow)
+                            .for_each(|g| g.status = value.clone());
                     }
                 }
                 Value::Unknown => (),
