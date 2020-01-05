@@ -1,3 +1,3 @@
-![SmartSTROM Logo](https://tsadswmaw001.blob.core.windows.net/ds-typo3-azure/assets/media/digitalstrom_logo.svg)
+![SmartSTROM Logo](http://www.smartwire.ch/wp-content/uploads/2015/01/digitalstrom.jpg)
 
 # digitalSTROM Server Api in Rust ⚡
