@@ -1,12 +1,13 @@
 [package]
 name = "dss"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Robert Schütte <schuetterobert@gmail.com>"]
 license = "MIT"
 edition = "2018"
 
 description = "Rust native DigitalStrom Server API"
-documentation = "https://docs.rs/dssim"
+readme = "README.md"
+documentation = "https://docs.rs/dss"
 homepage = "https://github.com/Roba1993/DSS"
 repository = "https://github.com/Roba1993/DSS"
 keywords = ["digital", "strom", "api", "rest"]
@@ -15,6 +16,6 @@ maintenance = { status = "actively-developed" }
 
 [dependencies]
 reqwest = "0.9.20"
-serde = "1.0.101"
-serde_json = "1.0.40"
+serde = "1.0.104"
+serde_json = "1.0.44"
 serde_repr = "0.1.5"
