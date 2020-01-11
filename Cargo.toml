@@ -2,7 +2,17 @@
 name = "dss"
 version = "0.1.0"
 authors = ["Robert Schütte <schuetterobert@gmail.com>"]
+license = "MIT"
 edition = "2018"
+
+description = "Rust native DigitalStrom Server API"
+documentation = "https://docs.rs/dssim"
+homepage = "https://github.com/Roba1993/DSS"
+repository = "https://github.com/Roba1993/DSS"
+keywords = ["digital", "strom", "api", "rest"]
+categories = ["api-bindings", "command-line-utilities"]
+maintenance = { status = "actively-developed" }
+license-file = "LICENSE"
 
 [dependencies]
 reqwest = "0.9.20"
