@@ -1,17 +1,30 @@
+/// The appartment gives you a easy and highlevel interface
+/// to a dss installation. It's the main struct this crates
+/// provides.
+///
+/// Please only use this interaface to a dss installation and
+/// not any other interface to the same installation at the same time.
+/// This crate is buffering information to keep the dss actions
+/// reponse times somewhat decent.
+/// Also don't use the RawAPI directly, because it has the same effect as
+/// using another interface and is leading to mismathcing data.
+/// This is unfortunatelly due to the really bad designed API from DSS.
 #[derive(Debug, Clone)]
 pub struct Appartement {
     inner: std::sync::Arc<std::sync::Mutex<InnerAppartement>>,
 }
 
 impl Appartement {
-    pub fn new<S>(host: S, user: S, password: S) -> Result<Appartement>
+    /// Connect to a DSS installation and fetch the complete structure of it.
+    /// Based on your appartment size, this can take around a minute.
+    pub fn connect<S>(host: S, user: S, password: S) -> Result<Appartement>
     where
         S: Into<String>,
     {
         // create the Appartment with the inner values
         let appt = Appartement {
             inner: std::sync::Arc::new(std::sync::Mutex::new(InnerAppartement {
-                api: Api::new(host, user, password)?,
+                api: RawApi::connect(host, user, password)?,
                 zones: vec![],
                 thread: std::sync::Arc::new(std::sync::Mutex::new(false)),
             })),
@@ -115,7 +128,7 @@ impl Appartement {
 
 #[derive(Debug)]
 struct InnerAppartement {
-    api: Api,
+    api: RawApi,
     zones: Vec<Zone>,
     thread: std::sync::Arc<std::sync::Mutex<bool>>,
 }
@@ -413,20 +426,24 @@ impl Drop for InnerAppartement {
     }
 }
 
+/// Raw interface towards the DSS-Rest service. This is not intend to be used
+/// directly from a API consumer. It misses important status management and
+/// abstraction over the different devices.
 #[derive(Debug, Clone)]
-pub struct Api {
+pub struct RawApi {
     host: String,
     user: String,
     password: String,
     token: String,
 }
 
-impl Api {
-    pub fn new<S>(host: S, user: S, password: S) -> Result<Api>
+impl RawApi {
+    /// Connect to the Digital Strom Server and try to login.
+    pub fn connect<S>(host: S, user: S, password: S) -> Result<Self>
     where
         S: Into<String>,
     {
-        let mut api = Api {
+        let mut api = RawApi {
             host: host.into(),
             user: user.into(),
             password: password.into(),
@@ -438,7 +455,7 @@ impl Api {
         Ok(api)
     }
 
-    pub fn login(&mut self) -> Result<()> {
+    fn login(&mut self) -> Result<()> {
         // build the client and allow invalid certificates
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -466,7 +483,11 @@ impl Api {
         Ok(())
     }
 
-    pub fn plain_request<S>(
+    /// Generic requset function, which handles the token inserting/login,
+    /// the json parsing and success check.
+    ///
+    /// It returns a json value, dependet on the request.
+    pub fn generic_request<S>(
         &self,
         request: S,
         parameter: Option<Vec<(&str, &str)>>,
@@ -518,6 +539,7 @@ impl Api {
         }
     }
 
+    /// Create a new event channel, which is listinging to events from the dss station.
     pub fn new_event_channel(
         &self,
     ) -> Result<(
@@ -528,7 +550,7 @@ impl Api {
         let thread_status = std::sync::Arc::new(std::sync::Mutex::new(true));
 
         // subscribe to event
-        self.plain_request(
+        self.generic_request(
             "event/subscribe",
             Some(vec![("name", "callScene"), ("subscriptionID", "911")]),
         )?;
@@ -541,7 +563,7 @@ impl Api {
         let ts = thread_status.clone();
         std::thread::spawn(move || loop {
             // listen for events at the server
-            let res = this.plain_request(
+            let res = this.generic_request(
                 "event/get",
                 Some(vec![("timeout", "3000"), ("subscriptionID", "911")]),
             );
@@ -559,7 +581,7 @@ impl Api {
             }
         });
 
-        // create a channel to send teh event to thhe receiver
+        // create a channel to send the event to thhe receiver
         let (inp, out) = std::sync::mpsc::channel();
 
         // this thread is processing the data and calls the event handler
@@ -635,10 +657,11 @@ impl Api {
         Ok(out)
     }
 
-    pub fn get_apartment_name(&self) -> Result<String> {
+    /// Receive the appartement name.
+    pub fn get_appartement_name(&self) -> Result<String> {
         // extract the name
         Ok(self
-            .plain_request("apartment/getName", None)?
+            .generic_request("apartment/getName", None)?
             .get("result")
             .ok_or("No result in Json response")?
             .get("name")
@@ -648,13 +671,14 @@ impl Api {
             .to_string())
     }
 
-    pub fn set_apartment_name<S>(&self, new_name: S) -> Result<bool>
+    /// Set the appartement name within the DSS.
+    pub fn set_appartement_name<S>(&self, new_name: S) -> Result<bool>
     where
         S: Into<String>,
     {
         // extract the name
         Ok(self
-            .plain_request(
+            .generic_request(
                 "apartment/getName",
                 Some(vec![("newName", &new_name.into())]),
             )?
@@ -664,8 +688,9 @@ impl Api {
             .ok_or("No boolean ok code")?)
     }
 
+    /// Request all zones from the DSS system.
     pub fn get_zones(&self) -> Result<Vec<Zone>> {
-        let mut json = self.plain_request("apartment/getReachableGroups", None)?;
+        let mut json = self.generic_request("apartment/getReachableGroups", None)?;
 
         // unpack the zones
         let json = json
@@ -677,8 +702,9 @@ impl Api {
         Ok(serde_json::from_value(json)?)
     }
 
+    /// Get the name of a specific zone from the DSS system.
     pub fn get_zone_name(&self, id: usize) -> Result<String> {
-        let res = self.plain_request("zone/getName", Some(vec![("id", &id.to_string())]))?;
+        let res = self.generic_request("zone/getName", Some(vec![("id", &id.to_string())]))?;
 
         // unpack the name
         let name = res
@@ -690,17 +716,19 @@ impl Api {
         Ok(name.to_string())
     }
 
+    /// Receive all devices availble in the appartement.
     pub fn get_devices(&self) -> Result<Vec<Device>> {
-        let res = self.plain_request("apartment/getDevices", None)?;
+        let res = self.generic_request("apartment/getDevices", None)?;
 
         Ok(serde_json::from_value(res)?)
     }
 
+    /// Request the scene mode for a specific device.
     pub fn get_device_scene_mode<S>(&self, device: S, scene_id: usize) -> Result<SceneMode>
     where
         S: Into<String>,
     {
-        let json = self.plain_request(
+        let json = self.generic_request(
             "device/getSceneMode",
             Some(vec![
                 ("dsid", &device.into()),
@@ -712,8 +740,9 @@ impl Api {
         Ok(serde_json::from_value(json)?)
     }
 
+    /// Get all available circuts
     pub fn get_circuits(&self) -> Result<Vec<Circut>> {
-        let mut res = self.plain_request("apartment/getCircuits", None)?;
+        let mut res = self.generic_request("apartment/getCircuits", None)?;
 
         let res = res
             .get_mut("circuits")
@@ -723,11 +752,12 @@ impl Api {
         Ok(serde_json::from_value(res)?)
     }
 
+    /// Get all available scenes for a specific zone with a type.
     pub fn get_scenes(&self, zone: usize, typ: Type) -> Result<Vec<usize>> {
         // convert the enum to usize
         let typ = typ as usize;
 
-        let mut json = self.plain_request(
+        let mut json = self.generic_request(
             "zone/getReachableScenes",
             Some(vec![
                 ("id", &zone.to_string()),
@@ -745,11 +775,12 @@ impl Api {
         Ok(serde_json::from_value(json)?)
     }
 
+    /// Return the last called scene for a zone.
     pub fn get_last_called_scene(&self, zone: usize, typ: Type) -> Result<usize> {
         // convert the enum to usize
         let typ = typ as usize;
 
-        let res = self.plain_request(
+        let res = self.generic_request(
             "zone/getLastCalledScene",
             Some(vec![
                 ("id", &zone.to_string()),
@@ -767,11 +798,12 @@ impl Api {
         Ok(number as usize)
     }
 
+    /// Trigger a scene for a specific zone and type in the dss system.
     pub fn call_scene(&self, zone: usize, typ: Type, scene: usize) -> Result<()> {
         // convert the enum to usize
         let typ = typ as usize;
 
-        self.plain_request(
+        self.generic_request(
             "zone/callScene",
             Some(vec![
                 ("id", &zone.to_string()),
@@ -783,6 +815,7 @@ impl Api {
         Ok(())
     }
 
+    /// Transforms a action to a scene call if possible and executes it
     pub fn call_action(&self, zone: usize, action: Action) -> Result<()> {
         // transform the action to a typ and scene
         let (typ, scene) = action
@@ -791,12 +824,13 @@ impl Api {
         self.call_scene(zone, typ, scene)
     }
 
+    /// Get the opening status of a single shadow device and resturns it.
     pub fn get_shadow_device_open<S>(&self, device: S) -> Result<f32>
     where
         S: Into<String>,
     {
         // make the request
-        let res = self.plain_request(
+        let res = self.generic_request(
             "device/getOutputValue",
             Some(vec![("dsid", &device.into()), ("offset", "2")]),
         )?;
@@ -826,6 +860,7 @@ impl Api {
         Ok(1.0 - value)
     }
 
+    /// Set the shadow opening for a single device
     pub fn set_shadow_device_open<S>(&self, device: S, value: f32) -> Result<()>
     where
         S: Into<String>,
@@ -843,7 +878,7 @@ impl Api {
         let value = (65535.0 * value) as usize;
 
         // make the request
-        self.plain_request(
+        self.generic_request(
             "device/setOutputValue",
             Some(vec![
                 ("dsid", &device.into()),
@@ -855,12 +890,13 @@ impl Api {
         Ok(())
     }
 
+    /// Get the shadow open angle for a single device.
     pub fn get_shadow_device_angle<S>(&self, device: S) -> Result<f32>
     where
         S: Into<String>,
     {
         // make the request
-        let res = self.plain_request(
+        let res = self.generic_request(
             "device/getOutputValue",
             Some(vec![("dsid", &device.into()), ("offset", "4")]),
         )?;
@@ -889,6 +925,7 @@ impl Api {
         Ok(value)
     }
 
+    /// Set the shade open angle for a single device
     pub fn set_shadow_device_angle<S>(&self, device: S, value: f32) -> Result<()>
     where
         S: Into<String>,
@@ -903,7 +940,7 @@ impl Api {
         let value = (255.0 * value) as usize;
 
         // make the request
-        self.plain_request(
+        self.generic_request(
             "device/setOutputValue",
             Some(vec![
                 ("dsid", &device.into()),
@@ -916,6 +953,8 @@ impl Api {
     }
 }
 
+/// Takes a String input and tries to convert it to the needed
+/// format requested by the struct.
 fn from_str<'de, T, D>(deserializer: D) -> std::result::Result<T, D::Error>
 where
     T: std::str::FromStr,
@@ -928,6 +967,12 @@ where
     T::from_str(&s).map_err(serde::de::Error::custom)
 }
 
+/// The event get fired by the digital strom server, whenever
+/// a scene was called.
+///
+/// A scene get's called when a switch is pressed in the appartment or
+/// a similar action get triggered. The direct set of
+/// shadow opennings or angles are getting not received.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     #[serde(default)]
@@ -961,6 +1006,8 @@ pub struct Event {
     pub group: usize,
 }
 
+/// A zone is like a room or sub-room in an appartment.
+/// It has a definable name and groups.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Zone {
     #[serde(alias = "zoneID")]
@@ -972,6 +1019,7 @@ pub struct Zone {
     pub groups: Vec<Group>,
 }
 
+/// The type definition is used for a group to determine what it controlls
 #[derive(serde_repr::Serialize_repr, serde_repr::Deserialize_repr, PartialEq, Debug, Clone)]
 #[repr(u8)]
 pub enum Type {
@@ -991,6 +1039,7 @@ pub enum Type {
 }
 
 impl From<u8> for Type {
+    /// Transform a unsigned integer representation towards a DSS Type.
     fn from(u: u8) -> Self {
         match u {
             1 => Type::Light,
@@ -1010,6 +1059,7 @@ impl From<u8> for Type {
     }
 }
 
+/// This object can be directly created by serde, when a string was given.
 impl std::str::FromStr for Type {
     type Err = std::num::ParseIntError;
 
@@ -1019,6 +1069,7 @@ impl std::str::FromStr for Type {
     }
 }
 
+/// An action defines what has happend to a specific group or what should happen.
 #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug, Clone)]
 pub enum Action {
     AllLightOn,
@@ -1139,6 +1190,8 @@ impl From<Event> for Action {
     }
 }
 
+/// The Value objects describes which status a group has. It is also used to
+/// set the new status of a group.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub enum Value {
     Light(f32),
@@ -1168,6 +1221,7 @@ impl Default for Value {
     }
 }
 
+/// A specific device which is used within a group
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Device {
     pub id: String,
@@ -1184,6 +1238,7 @@ pub struct Device {
     pub button_type: Type,
 }
 
+/// The device type describes, what kind of device is avilable.
 #[derive(Debug, Clone, serde::Serialize, PartialEq)]
 pub enum DeviceType {
     Switch,
@@ -1214,6 +1269,7 @@ impl<'de> serde::Deserialize<'de> for DeviceType {
     }
 }
 
+/// A circut is a device which provides meter functionality within a dss installation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Circut {
     #[serde(alias = "dsid")]
@@ -1225,6 +1281,7 @@ pub struct Circut {
     pub valid: bool,
 }
 
+/// Represents all special scene stats.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SceneMode {
     #[serde(alias = "sceneID")]
@@ -1241,6 +1298,7 @@ pub struct SceneMode {
     pub led_con_index: usize,
 }
 
+/// A Group which is located in a zone and holds all the single devices
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Group {
     id: usize,
@@ -1319,14 +1377,16 @@ impl Default for Group {
     }
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
-
+/// DSS error type to collect all the avilable errors which can occour.
 #[derive(Debug)]
 pub enum Error {
     Error(String),
     SerdeJson(serde_json::Error),
     Reqwest(reqwest::Error),
 }
+
+/// Short return type for the DSS Error
+type Result<T> = std::result::Result<T, Error>;
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {

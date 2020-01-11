@@ -160,8 +160,6 @@ fn main() -> Result<(), dss::Error> {
             println!("");
         }
     }
-
-    Ok(())
 }
 
 fn login() -> Result<dss::Appartement, dss::Error> {
@@ -197,5 +195,5 @@ fn login() -> Result<dss::Appartement, dss::Error> {
     println!("*> Login...");
 
     // try to login
-    dss::Appartement::new(host.trim(), user.trim(), pass.trim())
+    dss::Appartement::connect(host.trim(), user.trim(), pass.trim())
 }
