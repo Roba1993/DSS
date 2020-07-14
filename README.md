@@ -1,5 +1,9 @@
 ![SmartSTROM Logo](http://www.smartwire.ch/wp-content/uploads/2015/01/digitalstrom.jpg)
 
+[![crates.io](https://img.shields.io/crates/v/dss.svg)](https://crates.io/crates/dss)
+[![docs.rs](https://docs.rs/dss/badge.svg)](https://docs.rs/dss)
+[![license: MIT](https://img.shields.io/github/license/Roba1993/DSS)](https://github.com/Roba1993/DSS)
+
 # digitalSTROM Server Api in Rust ⚡
 This repository provides a digitalStrom Server API as well as a Command Line Interface to control your installation directly.
 
@@ -12,10 +16,10 @@ This repository provides a digitalStrom Server API as well as a Command Line Int
 ---
 
 # Usage of the API
-Add `yahoo-weather-rs` as a dependency in `Cargo.toml`:
+Add `dss` as a dependency in `Cargo.toml`:
 ```toml
 [dependencies]
-yahoo-weather = "0.2"
+dss = "0.1.1"
 ```
 
 ```rust
