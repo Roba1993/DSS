@@ -1399,14 +1399,6 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {
-    fn description(&self) -> &str {
-        match self {
-            Error::Error(s) => &s,
-            Error::SerdeJson(ref e) => e.description(),
-            Error::Reqwest(ref e) => e.description(),
-        }
-    }
-
     fn cause(&self) -> Option<&dyn std::error::Error> {
         match self {
             Error::Error(_) => None,
