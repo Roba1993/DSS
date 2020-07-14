@@ -1,6 +1,6 @@
 [package]
 name = "dss"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Robert Schütte <schuetterobert@gmail.com>"]
 license = "MIT"
 edition = "2018"

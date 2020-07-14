@@ -19,7 +19,7 @@ This repository provides a digitalStrom Server API as well as a Command Line Int
 Add `dss` as a dependency in `Cargo.toml`:
 ```toml
 [dependencies]
-dss = "0.1.1"
+dss = "0.1.2"
 ```
 
 ```rust
