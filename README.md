@@ -43,7 +43,31 @@ fn main() {
     * Run the CLI by typing `dss` and follow the login instructions
     * Run the CLI by typing `dss server user password` to login automatically
 3. Type `zones` to get an overview of your apprtment
-4. Type `light on 2` 2 is here the zoneId 
+4. Type `office light on` to turn the light on in the office zone
+
+Other Commands are:
+```
+office light off
+office light 0.0
+light 1.0 office
+light on 2
+
+office schadow open open
+shadow 0.5 0.5 office
+shadow 0.5 close 2
+```
+
+Small Special for the german folks:
+```
+büro licht an
+büro licht 0.0
+licht 1.0 büro
+licht an 2
+
+büro schatten auf auf
+schatten 0.5 0.5 büro
+schatten 0.5 zu 2
+```
 
 # Contributing
 Please contribute! 
