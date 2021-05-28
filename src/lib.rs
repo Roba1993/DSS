@@ -26,12 +26,52 @@ impl Appartement {
             inner: std::sync::Arc::new(std::sync::Mutex::new(InnerAppartement {
                 api: RawApi::connect(host, user, password)?,
                 zones: vec![],
+                file: None,
                 thread: std::sync::Arc::new(std::sync::Mutex::new(false)),
             })),
         };
 
         // update the complete structure
         appt.inner.lock()?.update_structure()?;
+
+        Ok(appt)
+    }
+
+    /// Connect to a DSS installation and load structure from file
+    pub fn connect_file<S>(host: S, user: S, password: S, file: S) -> Result<Appartement>
+    where
+        S: Into<String>,
+    {
+        let file = file.into();
+
+        // load the zones from file
+        let mut zones = vec![];
+        if let Ok(s) = std::fs::read_to_string(&file) {
+            let r = serde_json::from_str(&s);
+            if let Ok(z) = r {
+                zones = z;
+            } else {
+                println!("{:?}", r);
+            }
+        }
+
+        // create the Appartment with the inner values
+        let appt = Appartement {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(InnerAppartement {
+                api: RawApi::connect(host, user, password)?,
+                zones: zones,
+                file: Some(file),
+                thread: std::sync::Arc::new(std::sync::Mutex::new(false)),
+            })),
+        };
+
+        // update the complete structure if no zones where loaded
+        {
+            let mut a = appt.inner.lock()?;
+            if a.zones.is_empty() {
+                a.update_structure()?;
+            }
+        }
 
         Ok(appt)
     }
@@ -53,6 +93,10 @@ impl Appartement {
     pub fn update_all(&self) -> Result<Vec<Zone>> {
         self.inner.lock()?.update_structure()?;
         Ok(self.inner.lock()?.zones.clone())
+    }
+
+    pub fn get_value(&self, zone: usize, group: usize) -> Result<Value> {
+        self.inner.lock()?.get_value(zone, group)
     }
 
     pub fn set_value(&self, zone: usize, group: Option<usize>, value: Value) -> Result<()> {
@@ -100,17 +144,24 @@ impl Appartement {
                 let event = appr.lock().unwrap().update_event_value(event).unwrap();
 
                 // update the appartment structure with the event
-                appr.lock().unwrap().zones.iter_mut().for_each(|z| {
-                    // fine the right zone to the event
-                    if z.id == event.zone {
-                        z.groups.iter_mut().for_each(|g| {
-                            // find the right group typ && id to update the value
-                            if g.typ == event.typ && g.id == event.group {
-                                g.status = event.value.clone();
-                            }
-                        });
+                {
+                    let mut appr = appr.lock().unwrap();
+                    appr.zones.iter_mut().for_each(|z| {
+                        // fine the right zone to the event
+                        if z.id == event.zone {
+                            z.groups.iter_mut().for_each(|g| {
+                                // find the right group typ && id to update the value
+                                if g.typ == event.typ && g.id == event.group {
+                                    g.status = event.value.clone();
+                                }
+                            });
+                        }
+                    });
+
+                    if let Err(e) = appr.save_status() {
+                        println!("Error while saving: {}", e);
                     }
-                });
+                }
 
                 // send the event
                 match inp.send(event) {
@@ -130,10 +181,20 @@ impl Appartement {
 struct InnerAppartement {
     api: RawApi,
     zones: Vec<Zone>,
+    file: Option<String>,
     thread: std::sync::Arc<std::sync::Mutex<bool>>,
 }
 
 impl InnerAppartement {
+    fn get_value(&self, zone: usize, group: usize) -> Result<Value> {
+        self.zones
+            .iter()
+            .find(|z| z.id == zone)
+            .and_then(|z| z.groups.iter().find(|g| g.id == group))
+            .map(|g| g.status.clone())
+            .ok_or("No Value found for given device".into())
+    }
+
     fn set_value(&mut self, zone: usize, group: Option<usize>, value: Value) -> Result<()> {
         // when a group exist we control the special group
         if let Some(grp) = group {
@@ -411,7 +472,18 @@ impl InnerAppartement {
         }
 
         self.zones = zones;
+        if let Err(e) = self.save_status() {
+            println!("Error while saving: {}", e);
+        }
 
+        Ok(())
+    }
+
+    fn save_status(&self) -> Result<()> {
+        if let Some(file) = &self.file {
+            let content = serde_json::to_string(&self.zones)?;
+            std::fs::write(file, content)?;
+        }
         Ok(())
     }
 }
@@ -978,22 +1050,22 @@ pub struct Event {
     #[serde(default)]
     pub name: String,
 
-    #[serde(alias = "zoneID", deserialize_with = "from_str")]
+    #[serde(rename = "zoneID", deserialize_with = "from_str")]
     pub zone: usize,
 
-    #[serde(alias = "groupID", deserialize_with = "from_str")]
+    #[serde(rename = "groupID", deserialize_with = "from_str")]
     pub typ: Type,
 
-    #[serde(alias = "sceneID", deserialize_with = "from_str")]
+    #[serde(rename = "sceneID", deserialize_with = "from_str")]
     pub scene: usize,
 
-    #[serde(alias = "originToken")]
+    #[serde(rename = "originToken")]
     pub token: String,
 
-    #[serde(alias = "originDSUID")]
+    #[serde(rename = "originDSUID")]
     pub dsuid: String,
 
-    #[serde(alias = "callOrigin")]
+    #[serde(rename = "callOrigin")]
     pub origin: String,
 
     #[serde(default)]
@@ -1010,12 +1082,12 @@ pub struct Event {
 /// It has a definable name and groups.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Zone {
-    #[serde(alias = "zoneID")]
+    #[serde(rename = "zoneID")]
     pub id: usize,
     pub name: String,
-    #[serde(alias = "groups")]
+    #[serde(rename = "groups")]
     pub types: Vec<Type>,
-    #[serde(default)]
+    #[serde(default, rename = "dssGroups")]
     pub groups: Vec<Group>,
 }
 
@@ -1066,6 +1138,26 @@ impl std::str::FromStr for Type {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let u = u8::from_str(s)?;
         Ok(Type::from(u))
+    }
+}
+
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Light => write!(f, "Light"),
+            Type::Shadow => write!(f, "Shadow"),
+            Type::Heating => write!(f, "Heating"),
+            Type::Audio => write!(f, "Audio"),
+            Type::Video => write!(f, "Video"),
+            Type::Joker => write!(f, "Joker"),
+            Type::Cooling => write!(f, "Cooling"),
+            Type::Ventilation => write!(f, "Ventilation"),
+            Type::Window => write!(f, "Window"),
+            Type::AirRecirculation => write!(f, "AirRecirculation"),
+            Type::TemperatureControl => write!(f, "TemperatureControl"),
+            Type::ApartmentVentilation => write!(f, "ApartmentVentilation"),
+            Type::Unknown => write!(f, "Unknown"),
+        }
     }
 }
 
@@ -1213,6 +1305,19 @@ impl Value {
             _ => Value::Unknown,
         }
     }
+
+    pub fn as_bool(&self) -> bool {
+        match self {
+            Value::Light(v) => {
+                if v < &0.5 {
+                    false
+                } else {
+                    true
+                }
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Default for Value {
@@ -1226,15 +1331,15 @@ impl Default for Value {
 pub struct Device {
     pub id: String,
     pub name: String,
-    #[serde(alias = "zoneID")]
+    #[serde(rename = "zoneID")]
     pub zone_id: usize,
-    #[serde(alias = "isPresent")]
+    #[serde(rename = "isPresent")]
     pub present: bool,
-    #[serde(alias = "outputMode")]
+    #[serde(rename = "outputMode")]
     pub device_type: DeviceType,
-    #[serde(alias = "groups")]
+    #[serde(rename = "groups")]
     pub types: Vec<Type>,
-    #[serde(alias = "buttonActiveGroup")]
+    #[serde(rename = "buttonActiveGroup")]
     pub button_type: Type,
 }
 
@@ -1272,40 +1377,40 @@ impl<'de> serde::Deserialize<'de> for DeviceType {
 /// A circut is a device which provides meter functionality within a dss installation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Circut {
-    #[serde(alias = "dsid")]
+    #[serde(rename = "dsid")]
     pub id: String,
     pub name: String,
-    #[serde(alias = "isPresent")]
+    #[serde(rename = "isPresent")]
     pub present: bool,
-    #[serde(alias = "isValid")]
+    #[serde(rename = "isValid")]
     pub valid: bool,
 }
 
 /// Represents all special scene stats.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SceneMode {
-    #[serde(alias = "sceneID")]
+    #[serde(rename = "sceneID")]
     pub scene: usize,
-    #[serde(alias = "dontCare")]
+    #[serde(rename = "dontCare")]
     pub dont_care: bool,
-    #[serde(alias = "localPrio")]
+    #[serde(rename = "localPrio")]
     pub local_prio: bool,
-    #[serde(alias = "specialMode")]
+    #[serde(rename = "specialMode")]
     pub special_mode: bool,
-    #[serde(alias = "flashMode")]
+    #[serde(rename = "flashMode")]
     pub flash_mode: bool,
-    #[serde(alias = "ledconIndex")]
+    #[serde(rename = "ledconIndex")]
     pub led_con_index: usize,
 }
 
 /// A Group which is located in a zone and holds all the single devices
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Group {
-    id: usize,
-    zone_id: usize,
-    typ: Type,
-    status: Value,
-    devices: Vec<Device>,
+    pub id: usize,
+    pub zone_id: usize,
+    pub typ: Type,
+    pub status: Value,
+    pub devices: Vec<Device>,
 }
 
 impl Group {
@@ -1383,6 +1488,7 @@ pub enum Error {
     Error(String),
     SerdeJson(serde_json::Error),
     Reqwest(reqwest::Error),
+    Io(std::io::Error),
 }
 
 /// Short return type for the DSS Error
@@ -1394,6 +1500,7 @@ impl std::fmt::Display for Error {
             Error::Error(s) => write!(f, "{}", s),
             Error::SerdeJson(ref e) => e.fmt(f),
             Error::Reqwest(ref e) => e.fmt(f),
+            Error::Io(ref e) => e.fmt(f),
         }
     }
 }
@@ -1404,6 +1511,7 @@ impl std::error::Error for Error {
             Error::Error(s) => &s,
             Error::SerdeJson(ref e) => e.description(),
             Error::Reqwest(ref e) => e.description(),
+            Error::Io(ref e) => e.description(),
         }
     }
 
@@ -1412,6 +1520,7 @@ impl std::error::Error for Error {
             Error::Error(_) => None,
             Error::SerdeJson(ref e) => Some(e),
             Error::Reqwest(ref e) => Some(e),
+            Error::Io(ref e) => Some(e),
         }
     }
 }
@@ -1427,6 +1536,12 @@ impl From<&str> for Error {
 impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Self {
         Error::SerdeJson(err)
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Error::Io(err)
     }
 }
 
