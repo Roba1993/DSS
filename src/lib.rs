@@ -1514,10 +1514,7 @@ impl std::error::Error for Error {
             Error::Io(ref e) => e.description(),
         }
     }
-
     fn cause(&self) -> Option<&dyn std::error::Error> {
-        match self {
-            Error::Error(_) => None,
             Error::SerdeJson(ref e) => Some(e),
             Error::Reqwest(ref e) => Some(e),
             Error::Io(ref e) => Some(e),
