@@ -342,7 +342,7 @@ impl InnerAppartement {
         Ok(vec![event])
     }
 
-    fn update_event_value(&self, event: Event) -> Result<Event> {
+    fn update_event_value(&mut self, event: Event) -> Result<Event> {
         // make the event mutable
         let mut event = event;
 
@@ -351,7 +351,13 @@ impl InnerAppartement {
         Ok(event)
     }
 
-    fn update_value(&self, value: Value, typ: &Type, zone: usize, group: usize) -> Result<Value> {
+    fn update_value(
+        &mut self,
+        value: Value,
+        typ: &Type,
+        zone: usize,
+        group: usize,
+    ) -> Result<Value> {
         // when the value is already defined, the event is already updated
         if value != Value::Unknown {
             return Ok(value);
@@ -481,7 +487,7 @@ impl InnerAppartement {
 
     fn save_status(&self) -> Result<()> {
         if let Some(file) = &self.file {
-            let content = serde_json::to_string(&self.zones)?;
+            let content = serde_json::to_string_pretty(&self.zones)?;
             std::fs::write(file, content)?;
         }
         Ok(())
@@ -506,7 +512,7 @@ pub struct RawApi {
     host: String,
     user: String,
     password: String,
-    token: String,
+    token: std::sync::Arc<std::sync::RwLock<String>>,
 }
 
 impl RawApi {
@@ -515,11 +521,11 @@ impl RawApi {
     where
         S: Into<String>,
     {
-        let mut api = RawApi {
+        let api = RawApi {
             host: host.into(),
             user: user.into(),
             password: password.into(),
-            token: String::from(""),
+            token: std::sync::Arc::new(std::sync::RwLock::new(String::from(""))),
         };
 
         api.login()?;
@@ -527,7 +533,17 @@ impl RawApi {
         Ok(api)
     }
 
-    fn login(&mut self) -> Result<()> {
+    fn get_token(&self) -> Result<String> {
+        Ok(self.token.read()?.clone())
+    }
+
+    fn set_token(&self, token: &str) -> Result<()> {
+        let mut t = self.token.write()?;
+        *t = token.into();
+        Ok(())
+    }
+
+    fn login(&self) -> Result<()> {
         // build the client and allow invalid certificates
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -543,14 +559,16 @@ impl RawApi {
         let json: serde_json::Value = response.json()?;
 
         // extract the token
-        self.token = json
-            .get("result")
-            .ok_or("No result in Json response")?
-            .get("token")
-            .ok_or("No token in Json response")?
-            .as_str()
-            .ok_or("Token is not a String")?
-            .to_string();
+        self.set_token(
+            &json
+                .get("result")
+                .ok_or("No result in Json response")?
+                .get("token")
+                .ok_or("No token in Json response")?
+                .as_str()
+                .ok_or("Token is not a String")?
+                .to_string(),
+        )?;
 
         Ok(())
     }
@@ -563,15 +581,19 @@ impl RawApi {
         &self,
         request: S,
         parameter: Option<Vec<(&str, &str)>>,
+        retries: usize,
     ) -> Result<serde_json::Value>
     where
         S: Into<String>,
     {
+        let request = request.into();
+        let token = self.get_token()?;
+
         // Handle parameter and add token
-        let parameter = match parameter {
-            None => vec![("token", self.token.as_str())],
+        let para = match parameter.clone() {
+            None => vec![("token", token.as_ref())],
             Some(mut p) => {
-                p.push(("token", &self.token));
+                p.push(("token", &token));
                 p
             }
         };
@@ -584,23 +606,44 @@ impl RawApi {
 
         // make the login request
         let mut response = client
-            .get(&format!(
-                "https://{}:8080/json/{}",
-                self.host,
-                request.into()
-            ))
-            .query(&parameter)
+            .get(&format!("https://{}:8080/json/{}", self.host, request))
+            .query(&para)
             .send()?;
 
         let mut json: serde_json::Value = response.json()?;
 
-        // check if the response was sucessfull
+        // check if we got a response in right format
+        let ok_code = json
+            .get("ok")
+            .ok_or("No ok in Json response")?
+            .as_bool()
+            .ok_or("No boolean ok code")?;
+
+        // check if the ok code is false
+        if !ok_code {
+            // get the error message
+            let msg = json
+                .get("message")
+                .ok_or("No error message in Json response")?
+                .as_str()
+                .ok_or("Error message is not a string")?;
+
+            // if there are retries left, login again and retry
+            if retries > 0 {
+                self.login()?;
+                self.generic_request(request, parameter, retries - 1)?;
+            } else {
+                return Err(msg.into());
+            }
+        }
+
         if !json
             .get("ok")
             .ok_or("No ok in Json response")?
             .as_bool()
             .ok_or("No boolean ok code")?
         {
+            println!("Response error: {}", json);
             return Err("Request failed, no ok code received".into());
         }
 
@@ -613,7 +656,7 @@ impl RawApi {
 
     /// Create a new event channel, which is listinging to events from the dss station.
     pub fn new_event_channel(
-        &self,
+        &mut self,
     ) -> Result<(
         std::sync::mpsc::Receiver<Event>,
         std::sync::Arc<std::sync::Mutex<bool>>,
@@ -625,6 +668,7 @@ impl RawApi {
         self.generic_request(
             "event/subscribe",
             Some(vec![("name", "callScene"), ("subscriptionID", "911")]),
+            2,
         )?;
 
         // create a channel to send data from one to the other thread
@@ -638,6 +682,7 @@ impl RawApi {
             let res = this.generic_request(
                 "event/get",
                 Some(vec![("timeout", "3000"), ("subscriptionID", "911")]),
+                2,
             );
 
             // check if the thread should be ended
@@ -653,7 +698,7 @@ impl RawApi {
             }
         });
 
-        // create a channel to send the event to thhe receiver
+        // create a channel to send the event to the receiver
         let (inp, out) = std::sync::mpsc::channel();
 
         // this thread is processing the data and calls the event handler
@@ -733,7 +778,7 @@ impl RawApi {
     pub fn get_appartement_name(&self) -> Result<String> {
         // extract the name
         Ok(self
-            .generic_request("apartment/getName", None)?
+            .generic_request("apartment/getName", None, 2)?
             .get("result")
             .ok_or("No result in Json response")?
             .get("name")
@@ -753,6 +798,7 @@ impl RawApi {
             .generic_request(
                 "apartment/getName",
                 Some(vec![("newName", &new_name.into())]),
+                2,
             )?
             .get("ok")
             .ok_or("No ok in Json response")?
@@ -762,7 +808,7 @@ impl RawApi {
 
     /// Request all zones from the DSS system.
     pub fn get_zones(&self) -> Result<Vec<Zone>> {
-        let mut json = self.generic_request("apartment/getReachableGroups", None)?;
+        let mut json = self.generic_request("apartment/getReachableGroups", None, 2)?;
 
         // unpack the zones
         let json = json
@@ -776,7 +822,7 @@ impl RawApi {
 
     /// Get the name of a specific zone from the DSS system.
     pub fn get_zone_name(&self, id: usize) -> Result<String> {
-        let res = self.generic_request("zone/getName", Some(vec![("id", &id.to_string())]))?;
+        let res = self.generic_request("zone/getName", Some(vec![("id", &id.to_string())]), 2)?;
 
         // unpack the name
         let name = res
@@ -790,7 +836,7 @@ impl RawApi {
 
     /// Receive all devices availble in the appartement.
     pub fn get_devices(&self) -> Result<Vec<Device>> {
-        let res = self.generic_request("apartment/getDevices", None)?;
+        let res = self.generic_request("apartment/getDevices", None, 2)?;
 
         Ok(serde_json::from_value(res)?)
     }
@@ -806,6 +852,7 @@ impl RawApi {
                 ("dsid", &device.into()),
                 ("sceneID", &scene_id.to_string()),
             ]),
+            2,
         )?;
 
         // convert to SceneMode
@@ -814,7 +861,7 @@ impl RawApi {
 
     /// Get all available circuts
     pub fn get_circuits(&self) -> Result<Vec<Circut>> {
-        let mut res = self.generic_request("apartment/getCircuits", None)?;
+        let mut res = self.generic_request("apartment/getCircuits", None, 2)?;
 
         let res = res
             .get_mut("circuits")
@@ -835,6 +882,7 @@ impl RawApi {
                 ("id", &zone.to_string()),
                 ("groupID", &typ.to_string()),
             ]),
+            2,
         )?;
 
         // unpack the scenes
@@ -858,6 +906,7 @@ impl RawApi {
                 ("id", &zone.to_string()),
                 ("groupID", &typ.to_string()),
             ]),
+            2,
         )?;
 
         // unpack the scene
@@ -882,6 +931,7 @@ impl RawApi {
                 ("groupID", &typ.to_string()),
                 ("sceneNumber", &scene.to_string()),
             ]),
+            2,
         )?;
 
         Ok(())
@@ -905,6 +955,7 @@ impl RawApi {
         let res = self.generic_request(
             "device/getOutputValue",
             Some(vec![("dsid", &device.into()), ("offset", "2")]),
+            2,
         )?;
 
         // check for the right offset
@@ -957,6 +1008,7 @@ impl RawApi {
                 ("value", &format!("{}", value)),
                 ("offset", "2"),
             ]),
+            2,
         )?;
 
         Ok(())
@@ -971,6 +1023,7 @@ impl RawApi {
         let res = self.generic_request(
             "device/getOutputValue",
             Some(vec![("dsid", &device.into()), ("offset", "4")]),
+            2,
         )?;
 
         // check for the right offset
@@ -1019,6 +1072,7 @@ impl RawApi {
                 ("value", &format!("{}", value)),
                 ("offset", "4"),
             ]),
+            2,
         )?;
 
         Ok(())
@@ -1344,7 +1398,8 @@ pub struct Device {
 }
 
 /// The device type describes, what kind of device is avilable.
-#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(from = "String")]
 pub enum DeviceType {
     Switch,
     Light,
@@ -1365,14 +1420,121 @@ impl From<usize> for DeviceType {
     }
 }
 
+impl From<&str> for DeviceType {
+    fn from(s: &str) -> Self {
+        let s = s.trim().to_lowercase();
+
+        match s.as_ref() {
+            "switch" => DeviceType::Switch,
+            "light" => DeviceType::Light,
+            "tv" => DeviceType::Tv,
+            "shadow" => DeviceType::Shadow,
+            _ => {
+                if let Ok(n) = s.parse::<usize>() {
+                    DeviceType::from(n)
+                } else {
+                    DeviceType::Unknown
+                }
+            }
+        }
+    }
+}
+
+impl From<String> for DeviceType {
+    fn from(s: String) -> Self {
+        DeviceType::from(s.as_ref())
+    }
+}
+
+/*
 impl<'de> serde::Deserialize<'de> for DeviceType {
     fn deserialize<D>(deserializer: D) -> std::result::Result<DeviceType, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        Ok(DeviceType::from(usize::deserialize(deserializer)?))
+        deserializer.deserialize_unit(DeviceTypeVisitor)
     }
 }
+
+struct DeviceTypeVisitor;
+
+impl<'de> serde::de::Visitor<'de> for DeviceTypeVisitor {
+    type Value = DeviceType;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("an integer or the device type name")
+    }
+
+    fn visit_i8<E>(self, value: i8) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DeviceType::from(value as usize))
+    }
+
+    fn visit_i16<E>(self, value: i16) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DeviceType::from(value as usize))
+    }
+
+    fn visit_i32<E>(self, value: i32) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DeviceType::from(value as usize))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DeviceType::from(value as usize))
+    }
+
+    fn visit_u8<E>(self, value: u8) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DeviceType::from(value as usize))
+    }
+
+    fn visit_u16<E>(self, value: u16) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DeviceType::from(value as usize))
+    }
+
+    fn visit_u32<E>(self, value: u32) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DeviceType::from(value as usize))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DeviceType::from(value as usize))
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DeviceType::from(value))
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DeviceType::from(value.as_ref()))
+    }
+}*/
 
 /// A circut is a device which provides meter functionality within a dss installation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1515,6 +1677,8 @@ impl std::error::Error for Error {
         }
     }
     fn cause(&self) -> Option<&dyn std::error::Error> {
+        match self {
+            Error::Error(_) => None,
             Error::SerdeJson(ref e) => Some(e),
             Error::Reqwest(ref e) => Some(e),
             Error::Io(ref e) => Some(e),
