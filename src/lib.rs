@@ -1372,6 +1372,13 @@ impl Value {
             _ => false,
         }
     }
+
+    pub fn get_shadow_open(&self) -> Result<f32> {
+        match self {
+            Value::Shadow(open, _) => Ok(*open),
+            _ => Err("No shadow value".into()),
+        }
+    }
 }
 
 impl Default for Value {
@@ -1445,96 +1452,6 @@ impl From<String> for DeviceType {
         DeviceType::from(s.as_ref())
     }
 }
-
-/*
-impl<'de> serde::Deserialize<'de> for DeviceType {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<DeviceType, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_unit(DeviceTypeVisitor)
-    }
-}
-
-struct DeviceTypeVisitor;
-
-impl<'de> serde::de::Visitor<'de> for DeviceTypeVisitor {
-    type Value = DeviceType;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        formatter.write_str("an integer or the device type name")
-    }
-
-    fn visit_i8<E>(self, value: i8) -> std::result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Ok(DeviceType::from(value as usize))
-    }
-
-    fn visit_i16<E>(self, value: i16) -> std::result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Ok(DeviceType::from(value as usize))
-    }
-
-    fn visit_i32<E>(self, value: i32) -> std::result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Ok(DeviceType::from(value as usize))
-    }
-
-    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Ok(DeviceType::from(value as usize))
-    }
-
-    fn visit_u8<E>(self, value: u8) -> std::result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Ok(DeviceType::from(value as usize))
-    }
-
-    fn visit_u16<E>(self, value: u16) -> std::result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Ok(DeviceType::from(value as usize))
-    }
-
-    fn visit_u32<E>(self, value: u32) -> std::result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Ok(DeviceType::from(value as usize))
-    }
-
-    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Ok(DeviceType::from(value as usize))
-    }
-
-    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Ok(DeviceType::from(value))
-    }
-
-    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Ok(DeviceType::from(value.as_ref()))
-    }
-}*/
 
 /// A circut is a device which provides meter functionality within a dss installation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
