@@ -27,7 +27,7 @@ impl Appartement {
                 api: RawApi::connect(host, user, password)?,
                 zones: vec![],
                 file: None,
-                thread: std::sync::Arc::new(std::sync::Mutex::new(false)),
+                thread: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             })),
         };
 
@@ -59,9 +59,9 @@ impl Appartement {
         let appt = Appartement {
             inner: std::sync::Arc::new(std::sync::Mutex::new(InnerAppartement {
                 api: RawApi::connect(host, user, password)?,
-                zones: zones,
+                zones,
                 file: Some(file),
-                thread: std::sync::Arc::new(std::sync::Mutex::new(false)),
+                thread: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             })),
         };
 
@@ -110,9 +110,10 @@ impl Appartement {
     /// Therefore it's not recommended to call this function twice for one appartment.
     pub fn event_channel(&self) -> Result<std::sync::mpsc::Receiver<Event>> {
         // when there are threads already existing close them
-        if *self.inner.lock()?.thread.lock()? == true {
-            *self.inner.lock()?.thread.lock()? = false;
-        }
+        self.inner
+            .lock()?
+            .thread
+            .store(false, std::sync::atomic::Ordering::Relaxed);
 
         // request a new event channel
         let (recv, status) = self.inner.lock()?.api.new_event_channel()?;
@@ -124,6 +125,7 @@ impl Appartement {
         let internal_status = status.clone();
         let appr = self.inner.clone();
 
+        #[allow(clippy::while_let_loop)]
         std::thread::spawn(move || loop {
             // listen for events to pop up
             let event = match recv.recv() {
@@ -132,13 +134,14 @@ impl Appartement {
             };
 
             // check if the thread should be ended
-            if *internal_status.lock().unwrap() == false {
+            if !internal_status.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
 
             // expand the events when necessary
             let events = appr.lock().unwrap().expand_value(event).unwrap();
 
+            #[allow(clippy::suspicious_operation_groupings)]
             for event in events {
                 // update the event value for shadow etc.
                 let event = appr.lock().unwrap().update_event_value(event).unwrap();
@@ -182,7 +185,7 @@ struct InnerAppartement {
     api: RawApi,
     zones: Vec<Zone>,
     file: Option<String>,
-    thread: std::sync::Arc<std::sync::Mutex<bool>>,
+    thread: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl InnerAppartement {
@@ -192,7 +195,7 @@ impl InnerAppartement {
             .find(|z| z.id == zone)
             .and_then(|z| z.groups.iter().find(|g| g.id == group))
             .map(|g| g.status.clone())
-            .ok_or("No Value found for given device".into())
+            .ok_or_else(|| "No Value found for given device".into())
     }
 
     fn set_value(&mut self, zone: usize, group: Option<usize>, value: Value) -> Result<()> {
@@ -429,6 +432,7 @@ impl InnerAppartement {
                 zone.groups.append(&mut scene_groups);
             }
 
+            #[allow(clippy::suspicious_operation_groupings)]
             // for every group add the devices
             for group in &mut zone.groups {
                 // loop over all devices
@@ -443,9 +447,10 @@ impl InnerAppartement {
                     {
                         group.devices.push(device.clone());
                     }
-                    // when the devices matches, but the scene group is not 0 we need to check where to sort the device
+                    // when the devices matches, but the scene group is not 0 we need to check where to sort the devices
                     else if device.zone_id == group.zone_id && group.typ == device.button_type {
                         // check the device mode for this scene within that zone
+                        #[allow(clippy::bind_instead_of_map)]
                         let _ = self
                             .api
                             .get_device_scene_mode(device.id.clone(), group.id)
@@ -499,7 +504,8 @@ impl Drop for InnerAppartement {
         // if it fails we can't stop the threads
         #[allow(unused_must_use)]
         {
-            self.thread.lock().map(|mut v| *v = false);
+            self.thread
+                .store(false, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -659,10 +665,10 @@ impl RawApi {
         &mut self,
     ) -> Result<(
         std::sync::mpsc::Receiver<Event>,
-        std::sync::Arc<std::sync::Mutex<bool>>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
     )> {
         // shareable boolean to stop threads
-        let thread_status = std::sync::Arc::new(std::sync::Mutex::new(true));
+        let thread_status = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
 
         // subscribe to event
         self.generic_request(
@@ -686,7 +692,7 @@ impl RawApi {
             );
 
             // check if the thread should be ended
-            if *ts.lock().unwrap() == false {
+            if !ts.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
 
@@ -712,10 +718,11 @@ impl RawApi {
                 let res = recv.recv();
 
                 // check if the thread should be ended
-                if *ts.lock().unwrap() == false {
+                if !ts.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }
 
+                #[allow(clippy::bind_instead_of_map)]
                 res.and_then(|res| {
                     // continue when no reqwest (http) error occoured
                     res.and_then(|mut v| {
@@ -1361,14 +1368,9 @@ impl Value {
     }
 
     pub fn as_bool(&self) -> bool {
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
         match self {
-            Value::Light(v) => {
-                if v < &0.5 {
-                    false
-                } else {
-                    true
-                }
-            }
+            Value::Light(v) => !(v < &0.5),
             _ => false,
         }
     }
@@ -1496,7 +1498,7 @@ impl Group {
     pub fn new(id: usize, zone_id: usize, typ: Type) -> Self {
         Group {
             id,
-            zone_id: zone_id,
+            zone_id,
             typ,
             devices: vec![],
             status: Value::default(),
@@ -1545,7 +1547,7 @@ impl Group {
             return groups.into_iter().filter(|g| g.id > 0).collect();
         }
 
-        return groups;
+        groups
     }
 }
 

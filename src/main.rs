@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 fn main() -> Result<(), dss::Error> {
     // shown welcome screen
-    println!("");
+    println!();
     println!("**************************************************************");
     println!("*                 Digital Strom Server - CLI                 *");
     println!("**************************************************************");
@@ -118,7 +118,7 @@ fn main() -> Result<(), dss::Error> {
         // Show the help
         } else if cmd.starts_with("help") | cmd.starts_with("hilfe") {
             // print default help when no parameters are available
-            if cmds.len() < 1 {
+            if cmds.is_empty() {
                 print_help();
                 continue;
             }
@@ -249,7 +249,7 @@ fn print_help() {
     println!("shadow    Set the shadow for a zone");
     println!("exit      Exit the DSS CLI");
     println!("help      Show this help text");
-    println!("");
+    println!();
 }
 
 fn print_zone_help() {
