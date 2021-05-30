@@ -561,11 +561,8 @@ impl RawApi {
             .query(&[("user", &self.user), ("password", &self.password)])
             .send()?;
 
-        let msg = response.text()?;
-        println!("Login: {}", msg);
-
         // get the result as Json Value
-        let json: serde_json::Value = serde_json::from_str(&msg)?;
+        let json: serde_json::Value = response.json()?;
 
         // extract the token
         self.set_token(
@@ -1410,8 +1407,7 @@ pub struct Device {
 }
 
 /// The device type describes, what kind of device is avilable.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-#[serde(from = "String")]
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
 pub enum DeviceType {
     Switch,
     Light,
@@ -1455,6 +1451,27 @@ impl From<&str> for DeviceType {
 impl From<String> for DeviceType {
     fn from(s: String) -> Self {
         DeviceType::from(s.as_ref())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DeviceType {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<DeviceType, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::String(s) => DeviceType::from(s),
+            serde_json::Value::Number(num) => DeviceType::from(
+                num.as_u64()
+                    .ok_or_else(|| serde::de::Error::custom("Invalid number"))?
+                    as usize,
+            ),
+            _ => {
+                return Err(serde::de::Error::custom(
+                    "Wrong type to deserialize DeviceType",
+                ))
+            }
+        })
     }
 }
 
