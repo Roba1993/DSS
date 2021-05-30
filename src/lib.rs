@@ -561,8 +561,11 @@ impl RawApi {
             .query(&[("user", &self.user), ("password", &self.password)])
             .send()?;
 
+        let msg = response.text()?;
+        println!("Login: {}", msg);
+
         // get the result as Json Value
-        let json: serde_json::Value = response.json()?;
+        let json: serde_json::Value = serde_json::from_str(&msg)?;
 
         // extract the token
         self.set_token(
